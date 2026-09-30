@@ -7,6 +7,7 @@ hydraulic direction.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -26,9 +27,9 @@ def _connect():
 
 
 def _table_exists(cursor, table: str) -> bool:
-    cursor.execute("SELECT to_regclass(%s) IS NOT NULL", (f"public.{table}",))
+    cursor.execute("SELECT to_regclass(%s) IS NOT NULL AS table_exists", (f"public.{table}",))
     row = cursor.fetchone()
-    return bool(row and row[0])
+    return bool(row and row["table_exists"])
 
 
 def _nearest_reach(cursor, lat: float, lon: float, maximum_m: int = 50_000) -> dict[str, Any] | None:
@@ -37,11 +38,16 @@ def _nearest_reach(cursor, lat: float, lon: float, maximum_m: int = 50_000) -> d
     A purely Euclidean nearest line can select a parallel but hydraulically unrelated river
     in flat floodplains.  The catchment preference is therefore part of the snap score.
     """
+    latitude_delta = maximum_m / 110_000
+    longitude_delta = min(
+        180.0,
+        maximum_m / (110_000 * max(abs(math.cos(math.radians(lat))), 1e-6)),
+    )
     cursor.execute(
         """WITH p AS (
                SELECT ST_SetSRID(ST_MakePoint(%s,%s),4326) AS geom
              ), c AS (
-               SELECT geom FROM catchments,p
+               SELECT catchments.geom FROM catchments,p
                WHERE ST_Covers(catchments.geom,p.geom)
                ORDER BY area_km2 NULLS LAST LIMIT 1
              )
@@ -56,10 +62,11 @@ def _nearest_reach(cursor, lat: float, lon: float, maximum_m: int = 50_000) -> d
                     CASE WHEN EXISTS (SELECT 1 FROM c WHERE ST_Intersects(e.geom,c.geom)) THEN 0 ELSE 1 END AS catchment_penalty
              FROM network_edges e,p
              WHERE e.properties->>'source'='HydroRIVERS'
+               AND e.geom && ST_Expand(p.geom,%s,%s)
                AND ST_DWithin(e.geom::geography,p.geom::geography,%s)
              ORDER BY catchment_penalty, e.geom <-> p.geom
              LIMIT 1""",
-        (lon, lat, maximum_m),
+        (lon, lat, longitude_delta, latitude_delta, maximum_m),
     )
     row = cursor.fetchone()
     if not row:
@@ -76,11 +83,11 @@ def _nearest_reference_waterway(cursor, lat: float, lon: float, maximum_m: int =
     cursor.execute(
         """WITH p AS (SELECT ST_SetSRID(ST_MakePoint(%s,%s),4326) AS geom)
            SELECT waterway_id,name_th,name_en,main_river_name_th,waterway_class,source_layer,
-                  round(ST_Distance(geom::geography,p.geom::geography)::numeric) AS distance_m,
-                  ST_AsGeoJSON(geom)::json AS geometry
+                  round(ST_Distance(reference_waterways.geom::geography,p.geom::geography)::numeric) AS distance_m,
+                  ST_AsGeoJSON(reference_waterways.geom)::json AS geometry
            FROM reference_waterways,p
-           WHERE ST_DWithin(geom::geography,p.geom::geography,%s)
-           ORDER BY geom <-> p.geom LIMIT 1""",
+           WHERE ST_DWithin(reference_waterways.geom::geography,p.geom::geography,%s)
+           ORDER BY reference_waterways.geom <-> p.geom LIMIT 1""",
         (lon, lat, maximum_m),
     )
     row = cursor.fetchone()
