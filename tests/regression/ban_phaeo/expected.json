@@ -1,0 +1,12 @@
+{
+  "archetype": "Ban Phaeo",
+  "expected_properties": {
+    "controlled_canal_can_reverse": true,
+    "mae_klong_release_direct_into_damnoen": false,
+    "stale_stage_is_current": false,
+    "unknown_control_state_is_certain": false,
+    "sea_tide_is_inland_gate_stage": false,
+    "peak_height_without_stage_storage_is_eligible": false
+  },
+  "status": "STRUCTURAL_ONLY_NO_VERIFIED_FIELD_DATA"
+}

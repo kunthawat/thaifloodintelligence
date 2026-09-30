@@ -1,0 +1,10 @@
+{
+  "archetype": "Nan",
+  "expected_properties": {
+    "flash_to_river_handoff_supported": true,
+    "event_ends_when_local_headwater_falls": false,
+    "multiple_waves_supported": true,
+    "unverified_capacity_modifier_used": false
+  },
+  "status": "STRUCTURAL_ONLY_NO_VERIFIED_FIELD_DATA"
+}

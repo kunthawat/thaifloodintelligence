@@ -1,0 +1,9 @@
+archetype: Nan
+status: STRUCTURAL_ONLY_NO_VERIFIED_FIELD_DATA
+available_observations: false
+available_network: false
+available_controls: false
+available_boundaries: false
+notes:
+  - No measured values, network geometry, or coordinates are supplied in the workspace.
+  - Multiple waves and event handoff remain required behavior.

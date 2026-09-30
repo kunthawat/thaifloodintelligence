@@ -1,0 +1,10 @@
+archetype: Ubon
+status: STRUCTURAL_ONLY_NO_VERIFIED_FIELD_DATA
+available_observations: false
+available_network: false
+available_controls: false
+available_boundaries: false
+source_station_code: M.7
+notes:
+  - No measured values, network geometry, bank geometry, or coordinates are supplied in the workspace.
+  - Mekong boundary behavior must be wired after the complete Asia topology is imported.

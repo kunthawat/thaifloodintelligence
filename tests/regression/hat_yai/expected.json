@@ -1,0 +1,10 @@
+{
+  "archetype": "Hat Yai",
+  "expected_properties": {
+    "design_capacity_equals_effective_capacity": false,
+    "second_wave_survives_temporary_decline": true,
+    "lake_or_sea_boundary_supported": true,
+    "multiple_waves_supported": true
+  },
+  "status": "STRUCTURAL_ONLY_NO_VERIFIED_FIELD_DATA"
+}

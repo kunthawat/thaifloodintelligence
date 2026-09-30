@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+/local_runtime/
+.env
+.pytest_cache/
+.ruff_cache/
+node_modules/
+dist/
+/data/raw/
+/data/static/
+/data/cache/
+/data/rasters/
+/data/models/

@@ -1,0 +1,10 @@
+archetype: Hat Yai
+status: STRUCTURAL_ONLY_NO_VERIFIED_FIELD_DATA
+available_observations: false
+available_network: false
+available_controls: false
+available_boundaries: false
+source_station_code: X.44
+notes:
+  - No measured values, network geometry, gate telemetry, or coordinates are supplied in the workspace.
+  - Multiple inflow paths and later waves must remain represented when source datasets are available.

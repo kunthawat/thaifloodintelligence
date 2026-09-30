@@ -1,0 +1,11 @@
+{
+  "archetype": "Ubon",
+  "expected_properties": {
+    "floodplain_hysteresis_supported": true,
+    "bank_references_are_versioned": true,
+    "downstream_major_river_boundary_supported": true,
+    "missing_flash_product_means_zero_risk": false
+  },
+  "available_observations": null,
+  "status": "STRUCTURAL_REGRESSION_FIXTURE_NO_LIVE_DATA"
+}

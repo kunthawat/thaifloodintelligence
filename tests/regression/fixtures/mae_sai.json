@@ -1,0 +1,11 @@
+{
+  "archetype": "Mae Sai",
+  "expected_properties": {
+    "catchment_crosses_into_myanmar": true,
+    "cross_border_precipitation_fallback_required": true,
+    "official_warning_is_hydraulic_forcing": false,
+    "unsupported_depth_is_eligible": false
+  },
+  "available_observations": null,
+  "status": "STRUCTURAL_REGRESSION_FIXTURE_NO_LIVE_DATA"
+}

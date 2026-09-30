@@ -1,0 +1,10 @@
+archetype: Ban Phaeo
+status: STRUCTURAL_ONLY_NO_VERIFIED_FIELD_DATA
+available_observations: false
+available_network: false
+available_controls: false
+available_boundaries: false
+source_station_code: BP-BAN-PHAEO
+notes:
+  - No measured values or coordinates are supplied in the workspace.
+  - The 0.96 m MSL station-bank reference remains a candidate requiring runtime reconfirmation.

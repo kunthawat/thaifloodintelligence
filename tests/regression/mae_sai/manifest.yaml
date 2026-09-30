@@ -1,0 +1,10 @@
+archetype: Mae Sai
+status: STRUCTURAL_ONLY_NO_VERIFIED_FIELD_DATA
+available_observations: false
+available_network: false
+available_controls: false
+available_boundaries: false
+source_station_code: STN0029
+notes:
+  - No measured values, catchment geometry, or coordinates are supplied in the workspace.
+  - The documented catchment must retain its Myanmar contribution when imported.
