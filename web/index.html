@@ -7,7 +7,7 @@
     <meta name="description" content="แผนที่ติดตามสถานการณ์น้ำและความเสี่ยงน้ำท่วมทั่วประเทศไทย" />
     <title>Thai Flood Intelligence</title>
     <link rel="stylesheet" href="/assets/vendor/maplibre-gl.css" />
-    <link rel="stylesheet" href="/assets/app.css?v=3" />
+    <link rel="stylesheet" href="/assets/app.css?v=4" />
   </head>
   <body>
     <div class="app-shell">
@@ -40,8 +40,12 @@
 
             <div class="map-top-chips" aria-label="สถานะชั้นข้อมูล">
               <button class="map-chip is-unavailable" type="button" data-layer-shortcut="risk"><span class="chip-dot dot-risk">?</span><span>ความเสี่ยง</span><span class="chip-state">ข้อมูลไม่พอ</span></button>
-              <button class="map-chip" type="button" data-layer-shortcut="flow"><span class="chip-dot dot-flow">↗</span><span>โครงข่ายลำน้ำ</span><span class="chip-state">กดเพื่อแสดง</span></button>
-              <button class="map-chip" type="button" data-layer-shortcut="gauges"><span class="chip-dot dot-flow">◉</span><span>สถานีระดับน้ำ</span><span class="chip-state">กำลังแสดง</span></button>
+              <button class="map-chip" type="button" data-layer-shortcut="flow"><span class="chip-dot dot-flow">↗</span><span>โครงข่ายลำน้ำ</span><span class="chip-state">กำลังแสดง</span></button>
+              <button class="map-chip" type="button" data-layer-shortcut="gauges"><span class="chip-dot dot-flow">◉</span><span>สถานีระดับน้ำ</span><span class="chip-state">กดเพื่อแสดง</span></button>
+            </div>
+            <div id="flowLegend" class="map-legend" aria-label="คำอธิบายเส้นลำน้ำ">
+              <span class="map-legend-line dpm-line" aria-hidden="true"></span><span>แนวลำน้ำอ้างอิง DPM</span>
+              <span class="map-legend-line hydro-line" aria-hidden="true"></span><span>โครงข่ายธรรมชาติ HydroRIVERS</span>
             </div>
 
             <div class="map-controls" aria-label="ควบคุมแผนที่">
@@ -58,7 +62,7 @@
               <div class="floating-panel-head"><div><span class="eyebrow">MAP LAYERS</span><h2>ชั้นข้อมูลแผนที่</h2></div><button class="close-button" type="button" data-close="layersPanel" aria-label="ปิด">×</button></div>
               <div class="layer-group"><span class="layer-group-label">ข้อมูลหลัก</span>
                 <button class="layer-row" data-layer="risk" type="button"><span class="layer-icon risk-icon">?</span><span class="layer-text"><strong>ความเสี่ยงน้ำท่วม</strong><small>ทั่วประเทศไทย</small></span><span class="layer-status">ยังไม่มีข้อมูล</span></button>
-                <button class="layer-row" data-layer="flow" type="button"><span class="layer-icon flow-icon">↗</span><span class="layer-text"><strong>โครงข่ายลำน้ำ</strong><small>เส้นทางตาม HydroRIVERS</small></span><span class="layer-status">พร้อมแสดง</span></button>
+                <button class="layer-row" data-layer="flow" type="button"><span class="layer-icon flow-icon">↗</span><span class="layer-text"><strong>โครงข่ายลำน้ำ</strong><small>ลำน้ำหลัก/รอง DPM · topology HydroRIVERS</small></span><span class="layer-status">พร้อมแสดง</span></button>
                 <button class="layer-row" data-layer="gauges" type="button"><span class="layer-icon flow-icon">◉</span><span class="layer-text"><strong>สถานีวัดระดับน้ำ</strong><small>ค่าระดับน้ำล่าสุดจาก ThaiWater</small></span><span class="layer-status">พร้อมแสดง</span></button>
               </div>
               <div class="layer-group"><span class="layer-group-label">ข้อมูลประกอบ</span>
@@ -192,6 +196,6 @@
       </footer>
     </div>
     <script src="/assets/vendor/maplibre-gl.js" defer></script>
-    <script src="/assets/app.js?v=13" defer></script>
+    <script src="/assets/app.js?v=15" defer></script>
   </body>
 </html>

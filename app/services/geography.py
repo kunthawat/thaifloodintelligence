@@ -387,41 +387,49 @@ def hydraulic_station_links(lat: float, lon: float, stations: list[dict[str, Any
         return []
 
 
-def network_features(west: float, south: float, east: float, north: float, limit: int = 800) -> list[dict[str, Any]]:
+def network_features(west: float, south: float, east: float, north: float, limit: int = 1_500) -> list[dict[str, Any]]:
     bbox = "ST_MakeEnvelope(%s,%s,%s,%s,4326)"
-    hydro_limit = max(200, int(limit * 0.68))
-    reference_limit = max(120, limit - hydro_limit)
     wide_view = (east - west) > 3 or (north - south) > 3
+    # HydroRIVERS is the regional natural-river topology. At town/city scale,
+    # give most of the display budget to the finer DPM reference waterways.
+    hydro_limit = max(200, int(limit * 0.65)) if wide_view else max(100, int(limit * 0.15))
+    reference_limit = max(120, limit - hydro_limit)
+    hydro_simplify_tolerance = 0.0015 if wide_view else 0.00015
     with _connect() as connection, connection.cursor() as cursor:
         cursor.execute(
             f"""SELECT edge_id::text AS id,
-                       ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom,0.0015))::json AS geometry,
+                       ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom,%s))::json AS geometry,
                        network_confidence,
                        properties->'source_fields'->>'HYRIV_ID' AS reach_id,
                        NULL::text AS name_th,
                        'HydroRIVERS'::text AS source,
                        'HYDRORIVERS_NEXT_DOWN'::text AS topology_role
                 FROM network_edges
-                WHERE properties->>'source'='HydroRIVERS' AND geom && {bbox}
+                WHERE properties->>'source'='HydroRIVERS'
+                  AND geom && {bbox} AND ST_Intersects(geom,{bbox})
                 ORDER BY COALESCE(NULLIF(properties->'source_fields'->>'UPLAND_SKM','')::double precision,0) DESC,
                          length_m DESC NULLS LAST LIMIT %s""",
-            (west, south, east, north, hydro_limit),
+            (hydro_simplify_tolerance, west, south, east, north, west, south, east, north, hydro_limit),
         )
         rows = [dict(row) for row in cursor.fetchall()]
         if _table_exists(cursor, "reference_waterways"):
             class_filter = "AND waterway_class='MAIN'" if wide_view else ""
             cursor.execute(
                 f"""SELECT waterway_id AS id,
-                           ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom,0.0005))::json AS geometry,
+                           ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom,0.0001))::json AS geometry,
                            0.55::double precision AS network_confidence,
                            NULL::text AS reach_id,name_th,'DPM'::text AS source,
-                           'REFERENCE_ONLY'::text AS topology_role
-                    FROM reference_waterways WHERE geom && {bbox} {class_filter}
-                    ORDER BY CASE waterway_class WHEN 'MAIN' THEN 0 ELSE 1 END, ST_Length(geom) DESC
+                           'REFERENCE_ONLY'::text AS topology_role,waterway_class
+                    FROM reference_waterways
+                    WHERE geom && {bbox} AND ST_Intersects(geom,{bbox}) {class_filter}
+                    ORDER BY CASE waterway_class WHEN 'MAIN' THEN 0 ELSE 1 END,
+                             ST_Length(geom) DESC
                     LIMIT %s""",
-                (west, south, east, north, reference_limit),
+                (west, south, east, north, west, south, east, north, reference_limit),
             )
             rows.extend(dict(row) for row in cursor.fetchall())
+            for row in rows:
+                row.setdefault("waterway_class", "NATURAL_RIVER_TOPOLOGY")
         return rows
 
 

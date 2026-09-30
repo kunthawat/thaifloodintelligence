@@ -12,7 +12,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\start_local.ps1 -OpenBrows
 
 เปิดเองที่ `http://127.0.0.1:8899/` ได้เช่นกัน สคริปต์จะเปิด PostgreSQL/PostGIS แบบพกพาและแอปในเครื่องเมื่อยังไม่ทำงาน ฐานข้อมูลและไฟล์ GIS อยู่ใน `local_runtime/` และ `data/static/` ตามลำดับ หากย้าย workspace ไปเครื่องใหม่ ต้องติดตั้ง runtime และนำเข้าข้อมูลใหม่
 
-`start_local.ps1` จะรัน migration ที่ยังขาดให้อัตโนมัติ และพยายามนำเข้า DPM Hydrology reference layer ครั้งแรกแบบ best-effort; ถ้าเว็บ ปภ. ติดต่อไม่ได้ แอปยังเปิดด้วย HydroRIVERS ได้และค่อยรัน `python -m scripts.ensure_dpm_hydrology` ภายหลัง
+`start_local.ps1` จะรัน migration ที่ยังขาดให้อัตโนมัติ และนำเข้า DPM ลำน้ำสายหลักเพื่อให้เปิดแอปได้เร็ว ชั้น DPM ลำน้ำสายรองมีประมาณ 852,000 เส้นทั่วประเทศและไม่นำเข้าระหว่างเริ่มแอป ให้รันครั้งเดียวหลังเตรียมฐานข้อมูลเพื่อให้แผนที่ระดับตำบลมีเส้นละเอียดครบ:
+
+```powershell
+python -m scripts.import_dpm_hydrology --only-waterways-layer 5 --skip-basins
+```
+
+ถ้าเว็บ ปภ. ติดต่อไม่ได้ แอปยังเปิดด้วย HydroRIVERS ได้ แล้วค่อยนำเข้าชั้น DPM นี้ภายหลัง
 
 สถานะปัจจุบัน: PostGIS, HydroBASINS Asia 12 ระดับ, HydroRIVERS Asia และ HydroSHEDS Asia DEM/DIR/ACC นำเข้าแล้ว แผนที่ใช้ MapLibre GL JS กับ OpenFreeMap; ต้องใช้อินเทอร์เน็ตสำหรับแผนที่ฐาน ค้นหาตำบลจากขอบเขต ปภ. และเน้นขอบเขตตำบลที่เลือกได้ ขอบเขตทางการมี 76 จังหวัด 926 อำเภอ และ 7,658 รหัสตำบล โดยรวม 7,778 รูปต้นทางที่มีรหัสซ้ำเป็นขอบเขตหลายส่วน ค่าระดับน้ำและฝนที่สถานีจาก ThaiWater public API รีเฟรชแคชทุก 10 นาที ค่าที่สถานีไม่ใช่ระดับน้ำหรือฝน ณ จุดที่ค้นหา `GET /v1/location/readiness?lat=...&lon=...` แสดงหลักฐานแยกประเภทภัย ส่วน `GET /v1/data-quality` แสดงสถานะแหล่งข้อมูลและสถานะแพลตฟอร์ม
 
@@ -56,7 +62,8 @@ python -m scripts.ingest_rid
 python -m scripts.ingest_navy_tide --year 2026
 python -m scripts.ingest_tmd_qpe
 python -m scripts.import_dpm_boundaries
-python -m scripts.import_dpm_hydrology
+python -m scripts.import_dpm_hydrology --only-waterways-layer 4 --skip-basins
+python -m scripts.import_dpm_hydrology --only-waterways-layer 5 --skip-basins
 ```
 
 HII archive จะค้นพบจาก catalog ก่อน แล้วจึงนำเข้า resource ที่ได้จาก catalog:

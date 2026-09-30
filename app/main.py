@@ -421,10 +421,11 @@ def map_layer(layer_name: str, west: float | None = None, south: float | None = 
                                              "reach_id": row.get("reach_id"),
                                              "name_th": row.get("name_th"),
                                              "source": row.get("source"),
+                                             "waterway_class": row.get("waterway_class"),
                                              "topology_role": row.get("topology_role")}}
                              for row in rows],
                 "available": bool(rows), "reason": None if rows else "NO_FEATURES_IN_VIEWPORT",
-                "detail": "HydroRIVERS provides NEXT_DOWN topology; DPM waterways add local names/geometry as reference-only lines."}
+                "detail": "Detailed DPM waterways provide map reference geometry; HydroRIVERS provides regional NEXT_DOWN topology."}
     return {
         "layer": layer_name,
         "type": "FeatureCollection",

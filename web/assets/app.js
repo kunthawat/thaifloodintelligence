@@ -10,7 +10,7 @@
     expert: false,
     dataQuality: null,
     toastTimer: null,
-    activeLayer: 'gauges',
+    activeLayer: 'flow',
     layerTimer: null,
     layerRequest: 0,
     searchTimer: null,
@@ -90,9 +90,12 @@
       } else {
         map.addLayer({ id, type: 'line', source: id,
           paint: {
-            'line-color': ['case', ['==', ['get', 'topology_role'], 'REFERENCE_ONLY'], '#6f9eac', '#147dab'],
-            'line-width': ['case', ['==', ['get', 'topology_role'], 'REFERENCE_ONLY'], 1.2, 2.2],
-            'line-opacity': ['case', ['==', ['get', 'topology_role'], 'REFERENCE_ONLY'], 0.48, 0.8],
+            'line-color': ['case', ['==', ['get', 'source'], 'DPM'], '#087f9c', '#476a86'],
+            'line-width': ['interpolate', ['linear'], ['zoom'],
+              4, ['case', ['==', ['get', 'source'], 'DPM'], 0.9, 0.6],
+              9, ['case', ['==', ['get', 'source'], 'DPM'], 1.8, 1.0],
+              13, ['case', ['==', ['get', 'source'], 'DPM'], 2.8, 1.5]],
+            'line-opacity': ['case', ['==', ['get', 'source'], 'DPM'], 0.9, 0.32],
           } });
       }
       if (layer.stale) showToast('ข้อมูลสถานีจากครั้งล่าสุด · ยังอัปเดตไม่ได้');
@@ -818,13 +821,15 @@
     if (layer === 'flow' || layer === 'network-confidence' || layer === 'gauges' || layer === 'rain') {
       state.activeLayer = state.activeLayer === layer ? null : layer;
       const flowState = document.querySelector('[data-layer-shortcut="flow"] .chip-state');
-      if (flowState) flowState.textContent = state.activeLayer === 'flow' ? 'กำลังแสดง' : 'กดเพื่อแสดง';
+      const flowVisible = state.activeLayer === 'flow' || state.activeLayer === 'network-confidence';
+      if (flowState) flowState.textContent = flowVisible ? 'กำลังแสดง' : 'กดเพื่อแสดง';
+      $('#flowLegend').hidden = !flowVisible;
       const gaugeState = document.querySelector('[data-layer-shortcut="gauges"] .chip-state');
       if (gaugeState) gaugeState.textContent = state.activeLayer === 'gauges' ? 'กำลังแสดง' : 'กดเพื่อแสดง';
       if (state.activeLayer) {
         scheduleLayer();
         showToast(layer === 'gauges' ? 'กำลังแสดงสถานีระดับน้ำ ThaiWater' :
-          layer === 'rain' ? 'กำลังแสดงฝนตรวจวัด 24 ชั่วโมง ThaiWater' : 'กำลังแสดงโครงข่ายลำน้ำ HydroRIVERS');
+          layer === 'rain' ? 'กำลังแสดงฝนตรวจวัด 24 ชั่วโมง ThaiWater' : 'กำลังแสดงลำน้ำอ้างอิง DPM พร้อมโครงข่าย HydroRIVERS');
       } else {
         state.layerRequest += 1;
         clearMapLayers();

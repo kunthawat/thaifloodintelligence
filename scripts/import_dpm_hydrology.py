@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -21,25 +22,46 @@ BASE = "https://gis-portal.disaster.go.th/arcgis/rest/services/MapDX/DPM_TH_Hydr
 
 def _request(layer: int, **params) -> dict:
     query = {**params, "f": params.get("f", "json")}
-    url = f"{BASE}/{layer}/query?" + urlencode(query)
-    with urlopen(Request(url, headers={"User-Agent": "ThailandFloodIntelligence/0.2"}), timeout=45) as response:
-        payload = json.load(response)
-    if "error" in payload:
-        raise RuntimeError(f"DPM hydrology layer {layer}: {payload['error'].get('message')}")
-    return payload
+    url = f"{BASE}/{layer}/query"
+    body = urlencode(query).encode("utf-8")
+    request = Request(url, data=body, method="POST", headers={
+        "User-Agent": "ThailandFloodIntelligence/0.2",
+        "Content-Type": "application/x-www-form-urlencoded",
+    })
+    for attempt in range(3):
+        try:
+            with urlopen(request, timeout=90) as response:
+                payload = json.load(response)
+            if "error" in payload:
+                raise RuntimeError(f"DPM hydrology layer {layer}: {payload['error'].get('message')}")
+            return payload
+        except RuntimeError:
+            raise
+        except Exception:
+            if attempt == 2:
+                raise
+            time.sleep(1 + attempt)
+    raise RuntimeError(f"DPM hydrology layer {layer}: request retries exhausted")
 
 
 def _object_ids(layer: int) -> list[int]:
     return _request(layer, where="1=1", returnIdsOnly="true").get("objectIds") or []
 
 
-def _import_waterways(connection, layer: int, waterway_class: str) -> int:
+def _import_waterways(connection, layer: int, waterway_class: str, batch_size: int = 1_000) -> int:
     ids = _object_ids(layer)
     if not ids:
         raise RuntimeError(f"DPM hydrology layer {layer} returned no IDs")
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT count(*) FROM reference_waterways WHERE source_layer=%s AND waterway_class=%s",
+                       (layer, waterway_class))
+        existing_count = int(cursor.fetchone()[0])
+    if existing_count == len(ids):
+        print(f"DPM waterways layer {layer} already complete: {existing_count} features", flush=True)
+        return existing_count
     imported = 0
-    for offset in range(0, len(ids), 100):
-        chunk = ids[offset:offset + 100]
+    for offset in range(0, len(ids), batch_size):
+        chunk = ids[offset:offset + batch_size]
         fields = "*"
         data = _request(layer, objectIds=",".join(map(str, chunk)), outFields=fields, outSR="4326", f="geojson")
         rows = []
@@ -78,7 +100,8 @@ def _import_waterways(connection, layer: int, waterway_class: str) -> int:
                 rows,
             )
         imported += len(rows)
-        print(f"DPM waterways layer {layer}: {imported}/{len(ids)}", flush=True)
+        if imported % 25_000 < batch_size or imported == len(ids):
+            print(f"DPM waterways layer {layer}: {imported}/{len(ids)}", flush=True)
     return imported
 
 
@@ -118,14 +141,26 @@ def _import_basins(connection) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-basins", action="store_true")
+    parser.add_argument("--only-waterways-layer", type=int, choices=(4, 5),
+                        help="Import only one DPM waterways layer; layer 5 is the detailed secondary network.")
+    parser.add_argument("--batch-size", type=int, default=1_000)
     args = parser.parse_args()
+    if not 1 <= args.batch_size <= 1_000:
+        parser.error("--batch-size must be between 1 and 1000")
     url = configured_database_url()
     if not url:
         raise RuntimeError("DATABASE_URL/DATABASE_DSN is required")
     with psycopg.connect(url, autocommit=True) as connection:
-        main_count = _import_waterways(connection, 4, "MAIN")
-        secondary_count = _import_waterways(connection, 5, "SECONDARY")
+        layers = (args.only_waterways_layer,) if args.only_waterways_layer else (4, 5)
+        counts = {
+            layer: _import_waterways(connection, layer, "MAIN" if layer == 4 else "SECONDARY", args.batch_size)
+            for layer in layers
+        }
+        main_count = counts.get(4, 0)
+        secondary_count = counts.get(5, 0)
         basin_count = 0 if args.skip_basins else _import_basins(connection)
+        with connection.cursor() as cursor:
+            cursor.execute("ANALYZE reference_waterways")
     print({"main_waterways": main_count, "secondary_waterways": secondary_count, "major_basins": basin_count})
 
 
