@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from app.settings import configured_database_url
@@ -29,15 +30,23 @@ def database_status() -> dict[str, Any]:
                 cursor.execute("SELECT to_regclass('public.schema_migrations') IS NOT NULL")
                 has_migrations = bool(cursor.fetchone()[0])
                 migration_count = 0
+                applied_versions: set[str] = set()
                 if has_migrations:
-                    cursor.execute("SELECT count(*) FROM schema_migrations")
-                    migration_count = int(cursor.fetchone()[0])
+                    cursor.execute("SELECT version FROM schema_migrations")
+                    applied_versions = {str(item[0]) for item in cursor.fetchall()}
+                    migration_count = len(applied_versions)
+                migration_dir = Path(__file__).resolve().parents[2] / "db" / "migrations"
+                expected_versions = {path.name for path in migration_dir.glob("[0-9]*.sql")}
+                migrations_ready = bool(expected_versions) and expected_versions.issubset(applied_versions)
+                missing_migrations = sorted(expected_versions - applied_versions)
                 counts: dict[str, int] = {}
                 for table, key in (("basins", "basin_count"), ("network_edges", "network_edge_count"),
                                    ("terrain_products", "terrain_product_count"),
                                    ("admin_province", "admin_province_count"),
                                    ("admin_amphoe", "admin_amphoe_count"),
-                                   ("admin_tambon", "admin_tambon_count")):
+                                   ("admin_tambon", "admin_tambon_count"),
+                                   ("reference_waterways", "reference_waterway_count"),
+                                   ("dpm_major_basins", "dpm_major_basin_count")):
                     cursor.execute("SELECT to_regclass(%s) IS NOT NULL", (f"public.{table}",))
                     if cursor.fetchone()[0]:
                         cursor.execute(f"SELECT count(*) FROM {table}")
@@ -52,7 +61,8 @@ def database_status() -> dict[str, Any]:
             "state": "READY",
             "postgis_version": row[0] if row else None,
             "migrations_applied": migration_count,
-            "migrations_ready": migration_count >= 14,
+            "migrations_ready": migrations_ready,
+            "missing_migrations": missing_migrations,
             **counts,
         }
     except Exception as exc:  # health reporting must never prevent the API from serving its safe state

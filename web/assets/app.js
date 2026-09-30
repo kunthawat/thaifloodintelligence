@@ -15,6 +15,7 @@
     layerRequest: 0,
     searchTimer: null,
     searchRequest: 0,
+    routeAnimationFrame: null,
   };
   const map = new maplibregl.Map({
     container: tileLayer,
@@ -87,7 +88,12 @@
               ['>', ['coalesce', ['get', 'rain_24h_mm'], 0], 0], '#328dc3', '#a4b4bb'],
             'circle-opacity': .8, 'circle-stroke-color': '#fff', 'circle-stroke-width': .4 } });
       } else {
-        map.addLayer({ id, type: 'line', source: id, paint: { 'line-color': '#147dab', 'line-width': 2 } });
+        map.addLayer({ id, type: 'line', source: id,
+          paint: {
+            'line-color': ['case', ['==', ['get', 'topology_role'], 'REFERENCE_ONLY'], '#6f9eac', '#147dab'],
+            'line-width': ['case', ['==', ['get', 'topology_role'], 'REFERENCE_ONLY'], 1.2, 2.2],
+            'line-opacity': ['case', ['==', ['get', 'topology_role'], 'REFERENCE_ONLY'], 0.48, 0.8],
+          } });
       }
       if (layer.stale) showToast('ข้อมูลสถานีจากครั้งล่าสุด · ยังอัปเดตไม่ได้');
     } catch (_) {
@@ -100,6 +106,58 @@
       if (map.getLayer(id)) map.removeLayer(id);
     }
     for (const id of ['gauges-points', 'rain-points', 'flow-lines']) if (map.getSource(id)) map.removeSource(id);
+  }
+
+  function clearRouteLayers() {
+    if (state.routeAnimationFrame) cancelAnimationFrame(state.routeAnimationFrame);
+    state.routeAnimationFrame = null;
+    for (const id of ['selected-route-arrows', 'selected-route-flow', 'selected-route-base']) {
+      if (map.getLayer(id)) map.removeLayer(id);
+    }
+    if (map.getSource('selected-route')) map.removeSource('selected-route');
+  }
+
+  function routeBounds(geojson) {
+    const bounds = new maplibregl.LngLatBounds();
+    let any = false;
+    const visit = (coords) => {
+      if (!Array.isArray(coords)) return;
+      if (coords.length >= 2 && typeof coords[0] === 'number' && typeof coords[1] === 'number') {
+        bounds.extend([coords[0], coords[1]]); any = true; return;
+      }
+      coords.forEach(visit);
+    };
+    (geojson.features || []).forEach((feature) => visit(feature.geometry && feature.geometry.coordinates));
+    return any ? bounds : null;
+  }
+
+  function renderRouteOnMap(route, direction) {
+    clearRouteLayers();
+    const geojson = route.route_geojson;
+    if (!geojson || !(geojson.features || []).length) return;
+    map.addSource('selected-route', { type: 'geojson', data: geojson });
+    map.addLayer({ id: 'selected-route-base', type: 'line', source: 'selected-route',
+      paint: { 'line-color': direction === 'downstream' ? '#075c89' : '#73519a',
+        'line-width': ['interpolate', ['linear'], ['zoom'], 5, 4, 11, 7], 'line-opacity': .35 } });
+    map.addLayer({ id: 'selected-route-flow', type: 'line', source: 'selected-route',
+      paint: { 'line-color': direction === 'downstream' ? '#19a9d1' : '#a47ad2',
+        'line-width': ['interpolate', ['linear'], ['zoom'], 5, 2, 11, 4], 'line-opacity': .95 } });
+    // The API orients route geometry in the verified NEXT_DOWN direction for rendering.
+    map.addLayer({ id: 'selected-route-arrows', type: 'symbol', source: 'selected-route',
+      layout: { 'symbol-placement': 'line', 'symbol-spacing': 95, 'text-field': '▶',
+        'text-size': 12, 'text-rotation-alignment': 'map', 'text-keep-upright': false },
+      paint: { 'text-color': '#ffffff', 'text-halo-color': direction === 'downstream' ? '#075c89' : '#73519a',
+        'text-halo-width': 1.2, 'text-opacity': .95 } });
+    const bounds = routeBounds(geojson);
+    if (bounds) map.fitBounds(bounds, { padding: { top: 80, bottom: 100, left: 80, right: 380 }, maxZoom: 10, duration: 650 });
+    const started = performance.now();
+    const pulse = (now) => {
+      if (!map.getLayer('selected-route-flow')) { state.routeAnimationFrame = null; return; }
+      const phase = (Math.sin((now - started) / 360) + 1) / 2;
+      map.setPaintProperty('selected-route-flow', 'line-opacity', 0.58 + phase * 0.4);
+      state.routeAnimationFrame = requestAnimationFrame(pulse);
+    };
+    state.routeAnimationFrame = requestAnimationFrame(pulse);
   }
 
   function showToast(message) {
@@ -168,6 +226,7 @@
     $('#searchSuggestions').hidden = true;
     $('#locationPanel').classList.remove('is-expanded');
     closeRouteMessage();
+    clearRouteLayers();
   }
 
   async function api(path) {
@@ -185,31 +244,40 @@
     if (!selected) return;
     $('#riskHeadline').textContent = 'กำลังตรวจสอบข้อมูล';
     $('#riskSubhead').textContent = 'กำลังอ่านสถานะข้อมูลที่ระบบมีอยู่';
-    try {
-      const results = await Promise.all([
-        api(queryLocation('/v1/location/risk', selected)),
-        api(queryLocation('/v1/location/forecast', selected)),
-        api(queryLocation('/v1/location/explanation', selected)),
-        api(queryLocation('/v1/location/context', selected)),
-        api(queryLocation('/v1/location/readiness', selected)),
-      ]);
-      if (!state.selected || state.selected.lat !== selected.lat || state.selected.lon !== selected.lon) return;
-      const risk = results[0];
-      const forecast = results[1];
-      const explanation = results[2];
-      renderRisk(risk, forecast, explanation);
-      renderContext(results[3]);
-      renderReadiness(results[4]);
-      if (state.dataQuality) renderSourceStatus(state.dataQuality);
-      if (state.expert && state.dataQuality) renderExpert(forecast, state.dataQuality);
-      $('#updatedAt').textContent = 'ตรวจข้อมูลล่าสุดแล้ว · สถานะความเสี่ยงขึ้นกับข้อมูลตรวจวัดที่ผ่านเกณฑ์';
-    } catch (_) {
-      if (!state.selected || state.selected.lat !== selected.lat || state.selected.lon !== selected.lon) return;
-      $('#riskHeadline').textContent = 'ยังประเมินความเสี่ยงไม่ได้';
-      $('#riskSubhead').textContent = 'ยังเชื่อมต่อบริการประเมินข้อมูลไม่ได้';
-      $('#updatedAt').textContent = 'ยังอ่านสถานะบริการไม่ได้';
-      $('#uncertaintyText').textContent = 'สถานะบริการไม่พร้อม ข้อมูลนี้ไม่ยืนยันว่าพื้นที่ปลอดภัย';
+    const requests = [
+      api(queryLocation('/v1/location/risk', selected)),
+      api(queryLocation('/v1/location/forecast', selected)),
+      api(queryLocation('/v1/location/explanation', selected)),
+      api(queryLocation('/v1/location/context', selected)),
+      api(queryLocation('/v1/location/readiness', selected)),
+    ];
+    const results = await Promise.allSettled(requests);
+    if (!state.selected || state.selected.lat !== selected.lat || state.selected.lon !== selected.lon) return;
+    const value = (index, fallback) => results[index].status === 'fulfilled' ? results[index].value : fallback;
+    const risk = value(0, { occurrence: { eligible: false }, confidence: {}, official_warning: { available: false } });
+    const forecast = value(1, {});
+    const explanation = value(2, { uncertainties: [{ code: 'PARTIAL_API_FAILURE', message: 'บริการบางส่วนยังตอบสนองไม่ได้ แต่ข้อมูลส่วนที่เหลือยังแสดงได้' }] });
+    const context = value(3, null);
+    const readiness = value(4, null);
+
+    // Render every successful evidence path independently.  One failed endpoint must not
+    // erase a valid situation/readiness response from another endpoint.
+    renderRisk(risk, forecast, explanation);
+    if (context) renderContext(context);
+    if (readiness) renderReadiness(readiness);
+    if (state.dataQuality) renderSourceStatus(state.dataQuality);
+    if (state.expert && state.dataQuality) renderExpert(forecast, state.dataQuality);
+
+    const failed = results.filter((item) => item.status === 'rejected').length;
+    $('#updatedAt').textContent = failed
+      ? 'อ่านข้อมูลได้บางส่วน · บริการ ' + failed + ' รายการยังตอบสนองไม่ได้'
+      : 'ตรวจข้อมูลล่าสุดแล้ว · สถานะความเสี่ยงขึ้นกับข้อมูลตรวจวัดที่ผ่านเกณฑ์';
+    if (failed === results.length) {
+      $('#riskHeadline').textContent = 'ยังอ่านสถานการณ์ไม่ได้';
+      $('#riskSubhead').textContent = 'บริการข้อมูลทุกส่วนยังตอบสนองไม่ได้';
       showToast('ติดต่อบริการข้อมูลไม่ได้ โปรดลองอีกครั้ง');
+    } else if (failed) {
+      showToast('อ่านข้อมูลได้บางส่วน บางบริการยังไม่พร้อม');
     }
   }
 
@@ -280,11 +348,14 @@
   function renderContext(context) {
     const catchment = context.catchment;
     const reach = context.nearest_reach;
+    const reference = context.nearest_reference_waterway;
     $('#catchmentHeadline').textContent = catchment ? 'ลุ่มน้ำย่อย ' + catchment.catchment_id : 'ยังระบุลุ่มน้ำย่อยไม่ได้';
     $('#catchmentDetail').textContent = catchment
       ? 'HydroBASINS · พื้นที่ ' + (catchment.area_km2 == null ? 'ไม่ทราบ' : Number(catchment.area_km2).toFixed(1) + ' ตร.กม.') +
-        (reach ? ' · ลำน้ำ HydroRIVERS ห่างประมาณ ' + (Number(reach.distance_m) / 1000).toFixed(1) + ' กม.' : '')
-      : 'ตำแหน่งนี้ไม่มีขอบเขตลุ่มน้ำในชุดข้อมูลที่นำเข้า';
+        (reference ? ' · ลำน้ำอ้างอิง DPM: ' + (reference.name_th || reference.main_river_name_th || 'ไม่ระบุชื่อ') +
+          ' (' + (Number(reference.distance_m) / 1000).toFixed(1) + ' กม.)' : '') +
+        (reach ? ' · backbone HydroRIVERS ' + (Number(reach.distance_m) / 1000).toFixed(1) + ' กม.' : '')
+      : reference ? 'พบลำน้ำอ้างอิง DPM แต่ยังระบุ HydroBASINS ไม่ได้' : 'ตำแหน่งนี้ไม่มีขอบเขตลุ่มน้ำในชุดข้อมูลที่นำเข้า';
   }
 
   function renderSourceStatus(quality) {
@@ -432,7 +503,14 @@
       LOCAL_RAIN_OBSERVED: 'มีฝนที่สถานีใกล้เคียง',
       CATCHMENT_RAIN_OBSERVED: 'มีฝนในลุ่มน้ำเดียวกัน',
       RAIN_TRIGGER_THRESHOLD_UNVERIFIED: 'ยังไม่มีเกณฑ์ฝนที่ยืนยันสำหรับพื้นที่นี้',
-      WETNESS_AND_TIMEZONE_UNVERIFIED: 'ยังขาดความชื้นสะสมและการยืนยันเวลาฝน',
+      WETNESS_UNVERIFIED: 'ยังขาดข้อมูลความชื้นสะสมที่ยืนยันแล้ว',
+      HYDROLOGICALLY_CONNECTED_STAGE: 'พบสถานีระดับน้ำที่เชื่อมต่อผ่าน topology ของลำน้ำ',
+      BANK_OR_THRESHOLD_NOT_VERIFIED: 'ยังไม่มีระดับตลิ่งหรือเกณฑ์ที่ยืนยันสำหรับจุดนี้',
+      SAME_CATCHMENT_STAGE: 'มีสถานีระดับน้ำในลุ่มน้ำเดียวกัน',
+      HYDRAULIC_LINK_UNVERIFIED: 'ยังไม่ยืนยันเส้นทางไฮดรอลิกจากสถานีถึงจุดนี้',
+      RAINFALL_IS_CONTEXT_NOT_FLOOD_THRESHOLD: 'ค่าฝนใช้รายงานสถานการณ์ ยังไม่ใช่เกณฑ์น้ำท่วม',
+      TIDE_PREDICTION_SOURCE_AVAILABLE: 'มีแหล่งพยากรณ์น้ำขึ้นลงสำหรับพื้นที่ชายฝั่ง',
+      DOWNSTREAM_BOUNDARY_PROPAGATION_UNVERIFIED: 'ยังไม่ได้สอบเทียบการส่งผ่านระดับน้ำจากชายฝั่งเข้ามาด้านใน',
       NEARBY_RAIN_STATION: 'มีสถานีวัดฝนใกล้เคียง',
       OBSERVATION_TIMEZONE_UNVERIFIED: 'ยังยืนยันเวลาตรวจวัดไม่ได้',
       NO_CONNECTED_STAGE_OR_SCOPED_WARNING: 'ยังไม่มีระดับน้ำที่เชื่อมถึงจุดนี้หรือประกาศที่ระบุพื้นที่',
@@ -451,10 +529,19 @@
       $('#riskSubhead').textContent = 'ตรวจพบ ' + active.map(([key]) => hazardNames[key]).join(', ') + ' · ยังไม่มีค่าความน่าจะเป็นน้ำท่วม';
     } else if (readiness.overall === 'PARTIAL') {
       $('#riskBadgeSymbol').textContent = '~';
-      $('#riskBadgeLabel').textContent = 'มีข้อมูลบางส่วน';
+      $('#riskBadgeLabel').textContent = 'มีข้อมูลสถานการณ์';
       $('#riskBadge').className = 'status-badge is-partial';
-      $('#riskHeadline').textContent = 'มีข้อมูลพื้นที่บางส่วน';
-      $('#riskSubhead').textContent = 'ยังไม่พอระบุระดับความเสี่ยงหรือเวลาที่อาจเกิดน้ำท่วม';
+      $('#riskHeadline').textContent = 'รายงานสถานการณ์ได้บางส่วน';
+      $('#riskSubhead').textContent = 'มีหลักฐานตรวจวัด/บริบท แต่ยังไม่พอระบุระดับความเสี่ยงหรือเวลา';
+    } else if (readiness.situation && readiness.situation.ready) {
+      $('#riskBadgeSymbol').textContent = 'i';
+      $('#riskBadgeLabel').textContent = 'รายงานสถานการณ์ได้';
+      $('#riskBadge').className = 'status-badge is-partial';
+      $('#riskHeadline').textContent = 'มีข้อมูลสถานการณ์ แต่ยังประเมิน hazard ไม่ได้';
+      const evidence = readiness.situation.evidence || {};
+      $('#riskSubhead').textContent = 'สถานีระดับน้ำ ' + (evidence.nearby_stage_count || 0) +
+        ' · สถานีฝน ' + (evidence.nearby_rain_count || 0) +
+        ' · ประกาศปัจจุบัน ' + (evidence.current_warning_count || 0) + ' รายการ';
     }
     const list = $('#uncertaintyList');
     list.replaceChildren();
@@ -464,7 +551,10 @@
         ' — ' + (value.reasons || []).map((reason) => reasonNames[reason] || reason).join('; ');
       list.appendChild(item);
     });
-    $('#uncertaintyText').textContent = 'ความพร้อมของหลักฐานตามประเภทภัย ณ จุดที่เลือก · ไม่มีตัวเลขพยากรณ์ที่ผ่านเกณฑ์';
+    const situationStatus = readiness.situation && readiness.situation.status;
+    $('#uncertaintyText').textContent = situationStatus && situationStatus !== 'NOT_READY'
+      ? 'รายงานสถานการณ์: ' + situationStatus + ' · hazard/ตัวเลขพยากรณ์ยังแยกตาม eligibility ของแต่ละผลลัพธ์'
+      : 'ความพร้อมของหลักฐานตามประเภทภัย ณ จุดที่เลือก · ไม่มีตัวเลขพยากรณ์ที่ผ่านเกณฑ์';
   }
 
   function formatOutput(output, format) {
@@ -553,11 +643,43 @@
         message.textContent = 'ยังไม่พบลำน้ำที่ยืนยันแล้วใกล้ตำแหน่งนี้';
         return;
       }
-      const length = (route.reaches || []).reduce((sum, reach) => sum + (Number(reach.length_m) || 0), 0) / 1000;
-      message.textContent = (direction === 'upstream' ? 'ต้นน้ำ' : 'ปลายน้ำ') + ': โครงข่าย HydroRIVERS ' + route.reaches.length +
-        ' ช่วงลำน้ำ ระยะทางตามเส้นประมาณ ' + length.toFixed(1) + ' กม. · เป็นเส้นทางตามข้อมูลต้นฉบับ ไม่ใช่ทิศทางการไหลหรือเวลาเดินทางของน้ำ ณ ตอนนี้';
+      const length = Number(route.total_length_m || (route.reaches || []).reduce((sum, reach) => sum + (Number(reach.length_m) || 0), 0)) / 1000;
+      renderRouteOnMap(route, direction);
+      const terminal = route.terminal && route.terminal.type === 'OCEAN_OR_TERMINAL_OUTLET'
+        ? ' · ไล่โครงข่ายถึง outlet/ทะเลตาม NEXT_DOWN แล้ว'
+        : route.terminal && route.terminal.type === 'INLAND_SINK' ? ' · ปลายทางเป็น inland sink' :
+          route.truncated ? ' · เส้นทางถูกตัดตามขีดจำกัดการแสดงผล' : '';
+      message.textContent = (direction === 'upstream' ? 'ต้นน้ำที่เชื่อมถึงจุดนี้' : 'ปลายน้ำจากจุดนี้') + ': HydroRIVERS ' + route.reaches.length +
+        ' ช่วงลำน้ำ ระยะตามเส้นประมาณ ' + length.toFixed(1) + ' กม.' + terminal +
+        ' · ลูกศรคือทิศทาง topology จาก NEXT_DOWN ไม่ใช่ความเร็ว/ทิศทางไฮดรอลิกแบบ realtime';
     } catch (_) {
       message.textContent = 'อ่านเส้นทางลำน้ำไม่ได้ โปรดลองอีกครั้ง';
+    }
+  }
+
+  async function showSourceToOutlet() {
+    if (!state.selected) { showToast('เลือกตำแหน่งบนแผนที่ก่อน'); return; }
+    const message = $('#routeMessage');
+    message.hidden = false;
+    message.textContent = 'กำลังประกอบเส้นทางต้นน้ำถึงปลายทาง…';
+    try {
+      const route = await api(queryLocation('/v1/network/source-to-outlet', state.selected));
+      if (!route.available) {
+        clearRouteLayers();
+        message.textContent = 'ยังไม่มี topology ที่ยืนยันพอสำหรับแสดงต้นน้ำถึงปลายทาง';
+        return;
+      }
+      renderRouteOnMap(route, 'downstream');
+      const upCount = route.upstream && route.upstream.reach_count || 0;
+      const downCount = route.downstream && route.downstream.reach_count || 0;
+      const terminal = route.terminal && route.terminal.type === 'OCEAN_OR_TERMINAL_OUTLET'
+        ? ' และไล่ถึง outlet/ทะเลตาม HydroRIVERS'
+        : route.terminal && route.terminal.type === 'INLAND_SINK' ? ' และสิ้นสุดที่ inland sink' : '';
+      message.textContent = 'โครงข่ายต้นน้ำ ' + upCount + ' ช่วง + ปลายน้ำ ' + downCount + ' ช่วง' + terminal +
+        ' · ลูกศรแสดง topology downstream จาก NEXT_DOWN ไม่ใช่ความเร็วไหล realtime';
+    } catch (_) {
+      clearRouteLayers();
+      message.textContent = 'อ่านเส้นทางต้นน้ำถึงปลายทางไม่ได้ โปรดลองอีกครั้ง';
     }
   }
 
@@ -647,6 +769,7 @@
   $('#clearSelection').addEventListener('click', clearLocation);
   $('#upstreamButton').addEventListener('click', () => showRoute('upstream'));
   $('#downstreamButton').addEventListener('click', () => showRoute('downstream'));
+  $('#sourceToOutletButton').addEventListener('click', showSourceToOutlet);
   $('#layersButton').addEventListener('click', () => setLayerPanel($('#layersPanel').hidden));
   $('#settingsButton').addEventListener('click', () => {
     setExpertMode(!state.expert);

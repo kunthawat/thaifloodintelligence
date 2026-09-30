@@ -116,6 +116,7 @@ def location_context(
         "within_thailand": bool(admin),
         "catchment": context["catchment"],
         "nearest_reach": context["nearest_reach"],
+        "nearest_reference_waterway": context.get("nearest_reference_waterway"),
         "downstream_boundary": None,
         "network_confidence": context["network_confidence"],
         "availability": context["availability"],
@@ -159,6 +160,25 @@ def readiness_by_location(
 ) -> dict[str, Any]:
     _coordinates(lat, lon)
     return location_readiness(lat, lon, spatial_context(lat, lon).get("catchment"))
+
+
+@app.get("/v1/location/situation")
+def location_situation(
+    lat: float = Query(..., ge=-90, le=90),
+    lon: float = Query(..., ge=-180, le=180),
+) -> dict[str, Any]:
+    _coordinates(lat, lon)
+    readiness = location_readiness(lat, lon, spatial_context(lat, lon).get("catchment"))
+    return {
+        "location": readiness["location"],
+        "admin": readiness.get("admin"),
+        "situation": readiness.get("situation"),
+        "mode": readiness.get("mode"),
+        "hazards": readiness.get("hazards"),
+        "limitations": readiness.get("limitations", []),
+        "official_warnings": readiness.get("official_warnings"),
+        "generated_at": readiness.get("generated_at"),
+    }
 
 
 @app.get("/v1/location/admin-boundary")
@@ -214,7 +234,8 @@ def location_explanation(
         "location": coordinates,
         "risk_drivers": [],
         "risk_reducers": [],
-        "evidence": {"catchment": context["catchment"], "nearest_reach": context["nearest_reach"]},
+        "evidence": {"catchment": context["catchment"], "nearest_reach": context["nearest_reach"],
+                     "nearest_reference_waterway": context.get("nearest_reference_waterway")},
         "uncertainties": uncertainties,
         "availability": "INSUFFICIENT_DATA",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -230,6 +251,37 @@ def network_upstream(lat: float = Query(..., ge=-90, le=90), lon: float = Query(
 def network_downstream(lat: float = Query(..., ge=-90, le=90), lon: float = Query(..., ge=-180, le=180)) -> dict[str, Any]:
     return {"location": _coordinates(lat, lon), **river_route(lat, lon, "downstream"),
             "constraints": [], "constraints_available": False}
+
+
+@app.get("/v1/network/source-to-outlet")
+def network_source_to_outlet(
+    lat: float = Query(..., ge=-90, le=90),
+    lon: float = Query(..., ge=-180, le=180),
+) -> dict[str, Any]:
+    location = _coordinates(lat, lon)
+    upstream = river_route(lat, lon, "upstream", limit=60)
+    downstream = river_route(lat, lon, "downstream", limit=120)
+    features = []
+    seen = set()
+    for group, route in (("upstream", upstream), ("downstream", downstream)):
+        for feature in (route.get("route_geojson") or {}).get("features", []):
+            key = feature.get("id") or (feature.get("properties") or {}).get("reach_id")
+            if key in seen:
+                continue
+            seen.add(key)
+            copied = {**feature, "properties": {**(feature.get("properties") or {}), "route_group": group}}
+            features.append(copied)
+    return {
+        "location": location,
+        "available": bool(features),
+        "reason": None if features else "NO_VERIFIED_ROUTE",
+        "upstream": {key: upstream.get(key) for key in ("available", "reach_count", "total_length_m", "truncated")},
+        "downstream": {key: downstream.get(key) for key in ("available", "reach_count", "total_length_m", "truncated", "terminal")},
+        "terminal": downstream.get("terminal"),
+        "route_geojson": {"type": "FeatureCollection", "features": features},
+        "detail": "Natural-river topology from HydroRIVERS NEXT_DOWN; DPM waterways remain reference-only until directional topology is verified.",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @app.get("/v1/network/waves")
@@ -305,8 +357,10 @@ async def data_quality(refresh: bool = Query(default=False)) -> dict[str, Any]:
         (item := health_by_source.get("thaiwater_v3", {})).get("state") == "VALID"
         and item.get("details", {}).get("parsed_station_count", 0) > 0
     )
-    global_hazard_status = "PARTIAL" if gis_ready and (required_warning or measured_rain_available or
-                                                          stage_observations_available or required_rain or required_stage) else "NOT_READY"
+    any_evidence_path = bool(required_warning or measured_rain_available or stage_observations_available or
+                             required_rain or required_stage)
+    global_hazard_status = "PARTIAL" if gis_ready and any_evidence_path else "NOT_READY"
+    situation_report_ready = bool(gis_ready and (any_evidence_path or db.get("admin_tambon_count", 0) > 0))
     return {
         "database": db,
         "source_health": health_rows or source_health(),
@@ -315,7 +369,8 @@ async def data_quality(refresh: bool = Query(default=False)) -> dict[str, Any]:
         "readiness": {
             "DATA_PLATFORM_READY": db.get("state") == "READY" and db.get("migrations_ready", False),
             "MAP_READY": gis_ready,
-            "HAZARD_ONLY_READY": global_hazard_status == "READY",
+            "SITUATION_REPORT_READY": situation_report_ready,
+            "HAZARD_ONLY_READY": global_hazard_status in {"READY", "PARTIAL"},
             "GLOBAL_HAZARD_STATUS": global_hazard_status,
             "QUANT_FORECAST_PARTIAL": False,
             "QUANT_FORECAST_READY": False,
@@ -333,9 +388,11 @@ async def data_quality(refresh: bool = Query(default=False)) -> dict[str, Any]:
             "blockers": [name for name, ready in (
                 ("POSTGIS_MIGRATIONS_NOT_READY", db.get("migrations_ready", False)),
                 ("GIS_PRODUCTS_NOT_IMPORTED", gis_ready),
+            ) if not ready],
+            "degraded_capabilities": [name for name, ready in (
                 ("NO_CURRENT_SCOPED_OFFICIAL_WARNING", required_warning),
-                ("NO_CONFIGURED_VERIFIED_RAINFALL_PATHWAY", required_rain),
-                ("NO_STAGE_OR_WARNING_ONLY_PATHWAY", required_stage or required_warning),
+                ("NO_VERIFIED_NUMERIC_RAINFALL_MODEL_INPUT", required_rain),
+                ("NO_STAGE_OR_WARNING_PATHWAY", required_stage or required_warning or stage_observations_available),
             ) if not ready],
         },
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -360,11 +417,14 @@ def map_layer(layer_name: str, west: float | None = None, south: float | None = 
             rows = []
         return {"layer": layer_name, "type": "FeatureCollection",
                 "features": [{"type": "Feature", "id": row["id"], "geometry": row["geometry"],
-                              "properties": {"network_confidence": row["network_confidence"],
-                                             "reach_id": row["reach_id"], "source": "HydroRIVERS"}}
+                              "properties": {"network_confidence": row.get("network_confidence"),
+                                             "reach_id": row.get("reach_id"),
+                                             "name_th": row.get("name_th"),
+                                             "source": row.get("source"),
+                                             "topology_role": row.get("topology_role")}}
                              for row in rows],
                 "available": bool(rows), "reason": None if rows else "NO_FEATURES_IN_VIEWPORT",
-                "detail": "Source topology only; current flow direction and travel time are unverified."}
+                "detail": "HydroRIVERS provides NEXT_DOWN topology; DPM waterways add local names/geometry as reference-only lines."}
     return {
         "layer": layer_name,
         "type": "FeatureCollection",

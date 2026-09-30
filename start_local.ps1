@@ -26,6 +26,18 @@ if ($LASTEXITCODE -ne 0) {
     if (-not $ready) { throw 'PostgreSQL did not start. See local_runtime\logs\postgres.err.log.' }
 }
 
+# Migrations are idempotent and must run before the API so new topology/reference tables
+# are available after updating the repository.
+& $python -m db.migrate
+if ($LASTEXITCODE -ne 0) { throw 'Database migrations failed.' }
+
+# DPM waterways add local river/canal names and geometry.  They are reference-only and
+# are imported once.  Network failure must not prevent the app from starting.
+& $python -m scripts.ensure_dpm_hydrology
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning 'DPM hydrology reference import is not available yet; HydroRIVERS topology will still work.'
+}
+
 try {
     $health = Invoke-RestMethod -Uri 'http://127.0.0.1:8899/health' -TimeoutSec 3
     if ($health.service -ne 'thailand-flood-intelligence') { throw 'Port 8899 belongs to another service.' }

@@ -97,7 +97,7 @@ class ProviderConnector:
                                     "warning_is_not_hq_forcing": True}}
             endpoint = self._health_endpoint()
             params: dict[str, str] | None = None
-            if self.source_id in {"ldd_landuse_admin", "ldd_landuse_subbasin"}:
+            if self.source_id in {"ldd_landuse_admin", "ldd_landuse_subbasin", "dpm_hydrology"}:
                 params = {"f": "pjson"}
             if self.source_id == "ldd_soil_query":
                 layer_url = self._endpoint().rsplit("/query", 1)[0]
@@ -152,12 +152,20 @@ class ProviderConnector:
                     return {"status": "SOURCE_ERROR", "http_status": response.status, "latency_ms": response.latency_ms, "message": "JSON response has no recognized reservoir record list", "freshness": "UNKNOWN"}
                 details["record_count"] = len(records)
                 last_observed = _most_recent_date(records)
-            elif self.source_id.startswith("ldd_landuse_"):
+            elif self.source_id.startswith("ldd_landuse_") or self.source_id == "dpm_hydrology":
                 data = decode_json(response)
                 if isinstance(data, dict) and data.get("error"):
                     return {"status": "SOURCE_ERROR", "http_status": response.status, "latency_ms": response.latency_ms, "message": "ArcGIS layer returned an error", "freshness": "UNKNOWN"}
                 details["layer_name"] = data.get("name") if isinstance(data, dict) else None
                 details["spatial_reference"] = _spatial_reference(data)
+                if self.source_id == "dpm_hydrology":
+                    layer_ids = sorted(int(item.get("id")) for item in (data.get("layers") or []) if item.get("id") is not None)
+                    details["layer_ids"] = layer_ids
+                    details["reference_layers_available"] = all(value in layer_ids for value in (4, 5, 6))
+                    if not details["reference_layers_available"]:
+                        return {"status": "NOT_SUPPORTED", "http_status": response.status, "latency_ms": response.latency_ms,
+                                "message": "DPM hydrology service is reachable but required layers 4/5/6 are missing",
+                                "freshness": "STATIC", "details": details}
             elif self.source_id == "tmd_radar_discovery":
                 product = _find_tmd_qpe_href(response.url, response.text)
                 details["qpe_ascii_href"] = product
