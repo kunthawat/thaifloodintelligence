@@ -13,6 +13,34 @@ if (-not (Test-Path -LiteralPath $python)) { throw 'Python environment is missin
 if (-not (Test-Path -LiteralPath (Join-Path $root '.env'))) { throw 'Private .env is missing.' }
 New-Item -ItemType Directory -Force -Path $logs | Out-Null
 
+# A stale loopback proxy (commonly 127.0.0.1:9 in restricted shells) makes
+# urllib report every public data API as unreachable. Ignore only that invalid
+# local proxy for this app's child process; preserve the caller's environment.
+function Invoke-WithUnreachableLocalProxyDisabled {
+    param([scriptblock]$Action)
+
+    $removedProxies = @{}
+    foreach ($name in @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY')) {
+        $value = [Environment]::GetEnvironmentVariable($name, 'Process')
+        if (-not $value) { continue }
+        $proxyUri = $null
+        if ([Uri]::TryCreate($value, [UriKind]::Absolute, [ref]$proxyUri) -and
+            $proxyUri.IsLoopback -and $proxyUri.Port -eq 9) {
+            $removedProxies[$name] = $value
+            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+        }
+    }
+
+    try {
+        & $Action | Out-Host
+        return $LASTEXITCODE
+    } finally {
+        foreach ($name in $removedProxies.Keys) {
+            [Environment]::SetEnvironmentVariable($name, $removedProxies[$name], 'Process')
+        }
+    }
+}
+
 $pgReady = & (Join-Path $pgBin 'pg_isready.exe') -h 127.0.0.1 -p 5432 2>$null
 if ($LASTEXITCODE -ne 0) {
     $pgArgs = '-D "' + $pgData + '" -h 127.0.0.1 -p 5432'
@@ -28,13 +56,13 @@ if ($LASTEXITCODE -ne 0) {
 
 # Migrations are idempotent and must run before the API so new topology/reference tables
 # are available after updating the repository.
-& $python -m db.migrate
-if ($LASTEXITCODE -ne 0) { throw 'Database migrations failed.' }
+$pythonExitCode = Invoke-WithUnreachableLocalProxyDisabled { & $python -m db.migrate }
+if ($pythonExitCode -ne 0) { throw 'Database migrations failed.' }
 
 # DPM waterways add local river/canal names and geometry.  They are reference-only and
 # are imported once.  Network failure must not prevent the app from starting.
-& $python -m scripts.ensure_dpm_hydrology
-if ($LASTEXITCODE -ne 0) {
+$pythonExitCode = Invoke-WithUnreachableLocalProxyDisabled { & $python -m scripts.ensure_dpm_hydrology }
+if ($pythonExitCode -ne 0) {
     Write-Warning 'DPM hydrology reference import is not available yet; HydroRIVERS topology will still work.'
 }
 
@@ -44,7 +72,9 @@ try {
 } catch {
     if ($_.Exception.Message -match 'belongs to another service') { throw }
     $appArgs = '-m uvicorn app.main:app --host 127.0.0.1 --port 8899'
-    Start-Process -FilePath $python -ArgumentList $appArgs -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logs 'app.out.log') -RedirectStandardError (Join-Path $logs 'app.err.log') | Out-Null
+    Invoke-WithUnreachableLocalProxyDisabled {
+        Start-Process -FilePath $python -ArgumentList $appArgs -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logs 'app.out.log') -RedirectStandardError (Join-Path $logs 'app.err.log') | Out-Null
+    } | Out-Null
     $ready = $false
     for ($i = 0; $i -lt 30; $i++) {
         Start-Sleep -Seconds 1

@@ -22,6 +22,8 @@ from app.services.sources import get_source_registry, record_health_results, ref
 from app.services.admin_scope import location_admin, location_boundary, scoped_warnings
 from app.services.readiness import location_readiness
 from app.services.warning_refresh import background_refresh
+from app.services.observation_refresh import background_refresh as background_observation_refresh
+from app.services.events_live import waves_near_location, event_record
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
@@ -43,11 +45,13 @@ app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")
 @app.on_event("startup")
 async def start_warning_refresh() -> None:
     app.state.warning_refresh_task = asyncio.create_task(background_refresh())
+    app.state.observation_refresh_task = asyncio.create_task(background_observation_refresh())
 
 
 @app.on_event("shutdown")
 async def stop_warning_refresh() -> None:
     app.state.warning_refresh_task.cancel()
+    app.state.observation_refresh_task.cancel()
 
 
 def _coordinates(lat: float, lon: float) -> dict[str, float]:
@@ -130,25 +134,33 @@ def location_risk(
     lon: float = Query(..., ge=-180, le=180),
 ) -> dict[str, Any]:
     coordinates = _coordinates(lat, lon)
-    forecast = build_forecast(coordinates)
     readiness = location_readiness(lat, lon, spatial_context(lat, lon).get("catchment"))
-    warnings = readiness["official_warnings"]
+    forecast = build_forecast(coordinates, readiness)
+    hazard_rows = {}
+    mapping = {
+        "RIVER_OVERFLOW": "river_overflow", "FLASH_FLOOD": "flash_flood",
+        "LOCAL_RAIN": "local_rain", "COASTAL_TIDAL": "coastal_tidal", "COMPOUND": "compound",
+    }
+    for public_name, key in mapping.items():
+        row = (readiness.get("hazards") or {}).get(key, {})
+        hazard_rows[public_name] = {
+            "value": None, "eligible": False, "reason": "INSUFFICIENT_CALIBRATION",
+            "evidence_status": row.get("status", "NOT_READY"),
+            "evidence_reasons": row.get("reasons", []),
+        }
     return {
         "location": coordinates,
         "risk_level": "UNKNOWN",
         "overall_probability": None,
         "dominant_hazard": None,
-        "hazards": {
-            name: {"value": None, "eligible": False, "reason": "INSUFFICIENT_VALID_OBSERVATIONS"}
-            for name in ("RIVER_OVERFLOW", "FLASH_FLOOD", "LOCAL_RAIN", "COASTAL_TIDAL", "COMPOUND")
-        },
+        "hazards": hazard_rows,
         "occurrence": forecast["occurrence"],
         "confidence": forecast["confidence"],
-        "risk_drivers": [],
-        "risk_reducers": [],
-        "official_warning": warnings,
+        "risk_drivers": forecast["risk_drivers"],
+        "risk_reducers": forecast["risk_reducers"],
+        "official_warning": readiness["official_warnings"],
         "readiness": readiness,
-        "data_state": readiness["overall"],
+        "data_state": forecast["data_state"],
         "generated_at": forecast["generated_at"],
     }
 
@@ -195,7 +207,9 @@ def location_forecast(
     lat: float = Query(..., ge=-90, le=90),
     lon: float = Query(..., ge=-180, le=180),
 ) -> dict[str, Any]:
-    return build_forecast(_coordinates(lat, lon))
+    coordinates = _coordinates(lat, lon)
+    readiness = location_readiness(lat, lon, spatial_context(lat, lon).get("catchment"))
+    return build_forecast(coordinates, readiness)
 
 
 @app.get("/v1/location/forecast/curve")
@@ -224,21 +238,26 @@ def location_explanation(
 ) -> dict[str, Any]:
     coordinates = _coordinates(lat, lon)
     context = spatial_context(lat, lon)
-    uncertainties = [
-        {"code": "INSUFFICIENT_VALID_OBSERVATIONS", "message": "ข้อมูลฝนและระดับน้ำปัจจุบันยังไม่ครบพอสำหรับประเมินความเสี่ยง"},
-        {"code": "NO_ELIGIBLE_FORECAST", "message": "ยังไม่มีแบบจำลองที่ผ่านเกณฑ์สำหรับพยากรณ์เวลาและระดับน้ำ"},
-    ]
+    readiness = location_readiness(lat, lon, context.get("catchment"))
+    forecast = build_forecast(coordinates, readiness)
+    uncertainties = [{"code": code, "message": code.replace("_", " ")} for code in forecast["uncertainties"]]
     if not context["availability"]["available"]:
-        uncertainties.append({"code": context["availability"]["reason"], "message": "ไม่พบขอบเขตลุ่มน้ำหรือลำน้ำที่ยืนยันแล้วสำหรับจุดนี้"})
+        uncertainties.append({"code": context["availability"]["reason"],
+                              "message": "ไม่พบขอบเขตลุ่มน้ำหรือลำน้ำที่ยืนยันแล้วสำหรับจุดนี้"})
     return {
         "location": coordinates,
-        "risk_drivers": [],
-        "risk_reducers": [],
-        "evidence": {"catchment": context["catchment"], "nearest_reach": context["nearest_reach"],
-                     "nearest_reference_waterway": context.get("nearest_reference_waterway")},
+        "risk_drivers": forecast["risk_drivers"],
+        "risk_reducers": forecast["risk_reducers"],
+        "evidence": {
+            "catchment": context["catchment"],
+            "nearest_reach": context["nearest_reach"],
+            "nearest_reference_waterway": context.get("nearest_reference_waterway"),
+            "hazards": readiness.get("hazards"),
+            "situation": readiness.get("situation"),
+        },
         "uncertainties": uncertainties,
-        "availability": "INSUFFICIENT_DATA",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "availability": forecast["data_state"],
+        "generated_at": forecast["generated_at"],
     }
 
 
@@ -286,18 +305,18 @@ def network_source_to_outlet(
 
 @app.get("/v1/network/waves")
 def network_waves(lat: float = Query(..., ge=-90, le=90), lon: float = Query(..., ge=-180, le=180)) -> dict[str, Any]:
-    return {
-        "location": _coordinates(lat, lon),
-        "events": [],
-        "available": False,
-        "reason": "EVENT_DATA_UNAVAILABLE",
-        "detail": "รายการว่างนี้หมายถึงยังเข้าถึงข้อมูลเหตุการณ์ไม่ได้ ไม่ได้ยืนยันว่าไม่มีคลื่นน้ำ",
-    }
+    location = _coordinates(lat, lon)
+    result = waves_near_location(lat, lon)
+    return {"location": location, **result,
+            "detail": "Only persisted tracked waves are returned; an empty list is not proof that no flood wave exists."}
 
 
 @app.get("/v1/events/{event_id}")
 def event_details(event_id: str) -> dict[str, Any]:
-    raise HTTPException(status_code=404, detail={"code": "EVENT_NOT_FOUND", "event_id": event_id})
+    event = event_record(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail={"code": "EVENT_NOT_FOUND", "event_id": event_id})
+    return event
 
 
 @app.get("/v1/stations/{station_id}")

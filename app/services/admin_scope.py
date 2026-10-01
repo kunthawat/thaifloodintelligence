@@ -158,12 +158,12 @@ def scoped_warnings(lat: float, lon: float) -> dict[str, Any]:
         item["issued_at"] = item["issued_at"].astimezone(timezone.utc).isoformat()
     source_valid = source["state"] in ("VALID", "VALID_ZERO")
     source_fresh = source["freshness"] == "FRESH"
-    unresolved = bool(counts["unresolved"])
-    reason = ("UNRESOLVED_WARNING_SCOPE" if unresolved else
-              "WARNING_SOURCE_UNAVAILABLE" if not source_valid else
+    # Unresolved warnings elsewhere in Thailand are diagnostics only; they must not
+    # make the warning source unavailable for this point.
+    reason = ("WARNING_SOURCE_UNAVAILABLE" if not source_valid else
               "WARNING_SOURCE_STALE" if not source_fresh else
               "NO_CURRENT_WARNINGS" if not items else None)
-    return {"available": bool(source_valid and source_fresh and not unresolved),
+    return {"available": bool(source_valid and source_fresh),
             "checked": True, "source": source, "items": items,
             "reason": reason,
             "active_record_count": counts["total"], "unresolved_record_count": counts["unresolved"],

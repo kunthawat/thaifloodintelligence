@@ -55,7 +55,9 @@ def normalize(payload: dict) -> list[dict]:
 
 def _read_cache() -> dict | None:
     try:
-        return json.loads(CACHE.read_text(encoding="utf-8"))
+        cached = json.loads(CACHE.read_text(encoding="utf-8"))
+        age = time.time() - CACHE.stat().st_mtime
+        return {**cached, "stale": age >= MAX_AGE_SECONDS}
     except (FileNotFoundError, ValueError, OSError):
         return None
 

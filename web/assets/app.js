@@ -4,6 +4,7 @@
   const $ = (selector) => document.querySelector(selector);
   const mapEl = $('#map');
   const tileLayer = $('#tiles');
+  const panelScroll = $('.panel-scroll');
   const DEFAULT_ZOOM = 5;
   const state = {
     selected: null,
@@ -17,6 +18,15 @@
     searchRequest: 0,
     routeAnimationFrame: null,
   };
+  panelScroll.addEventListener('wheel', (event) => {
+    if (event.ctrlKey || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+    const maxScroll = panelScroll.scrollHeight - panelScroll.clientHeight;
+    if (maxScroll <= 0) return;
+    event.preventDefault();
+    const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 :
+      event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? panelScroll.clientHeight : 1;
+    panelScroll.scrollTop = Math.max(0, Math.min(maxScroll, panelScroll.scrollTop + event.deltaY * unit));
+  }, { passive: false });
   const map = new maplibregl.Map({
     container: tileLayer,
     style: 'https://tiles.openfreemap.org/styles/liberty',
@@ -220,6 +230,12 @@
 
   function clearLocation() {
     state.selected = null;
+    updateRiskStatusChip(state.dataQuality ? 'ค้นหาพื้นที่' : 'กำลังตรวจข้อมูล', 'is-context');
+    document.querySelectorAll('.hazard-status').forEach((item) => {
+      item.textContent = 'รอเลือกพื้นที่';
+      delete item.dataset.status;
+      item.removeAttribute('title');
+    });
     if (selectedMarker) selectedMarker.remove();
     selectedMarker = null;
     if (map.getSource('selected-admin')) map.getSource('selected-admin').setData({ type: 'FeatureCollection', features: [] });
@@ -274,7 +290,9 @@
     const failed = results.filter((item) => item.status === 'rejected').length;
     $('#updatedAt').textContent = failed
       ? 'อ่านข้อมูลได้บางส่วน · บริการ ' + failed + ' รายการยังตอบสนองไม่ได้'
-      : 'ตรวจข้อมูลล่าสุดแล้ว · สถานะความเสี่ยงขึ้นกับข้อมูลตรวจวัดที่ผ่านเกณฑ์';
+      : readiness && readiness.situation && readiness.situation.ready
+      ? 'อ่านสถานการณ์พื้นที่แล้ว · ยังไม่มีตัวเลขพยากรณ์ที่ผ่านเกณฑ์'
+      : 'ตรวจข้อมูลล่าสุดแล้ว · เลือกดูหลักฐานตามประเภทภัยได้';
     if (failed === results.length) {
       $('#riskHeadline').textContent = 'ยังอ่านสถานการณ์ไม่ได้';
       $('#riskSubhead').textContent = 'บริการข้อมูลทุกส่วนยังตอบสนองไม่ได้';
@@ -287,6 +305,7 @@
   async function loadNearbyGauges(lat, lon) {
     $('#gaugeHeadline').textContent = 'กำลังอ่านสถานี';
     $('#gaugeDetail').textContent = 'ค่าที่สถานีไม่ใช่ค่าระดับน้ำ ณ จุดที่เลือก';
+    $('#gaugeBankDetail').hidden = true;
     try {
       const data = await api('/v1/location/nearby-gauges?lat=' + lat + '&lon=' + lon);
       if (!state.selected || state.selected.lat !== lat || state.selected.lon !== lon) return;
@@ -297,10 +316,26 @@
       $('#gaugeDetail').textContent = level + ' · ห่างประมาณ ' + station.distance_km_approx.toFixed(1) + ' กม. · เวลาในแหล่งข้อมูล ' +
         (station.observed_at_source || 'ไม่ระบุ') + (data.stale ? ' · ข้อมูลค้างจากครั้งก่อน' : '') +
         ' · ค่าที่สถานี ไม่ใช่ระดับน้ำที่จุดนี้';
+      const bankDetail = $('#gaugeBankDetail');
+      const relation = (station.bank_relation_text || '').replace(/\s*\(ม\.\)\s*$/, '').trim();
+      const bankParts = [];
+      if (relation && station.bank_distance_m != null) {
+        bankParts.push(relation + ' ' + Number(station.bank_distance_m).toFixed(2) + ' ม.');
+      }
+      if (station.bank_reference_quality === 'RUNTIME_CROSSCHECKED' && station.bank_level_msl_m != null) {
+        bankParts.push('ตลิ่งต่ำสุดสถานี ' + Number(station.bank_level_msl_m).toFixed(2) + ' ม. MSL');
+      } else if (station.source_bank_min_m != null) {
+        bankParts.push('ต้นทางรายงานค่าตลิ่ง ' + Number(station.source_bank_min_m).toFixed(2) + ' ม. แต่ยังยืนยัน datum ไม่ได้');
+      }
+      bankDetail.textContent = bankParts.length
+        ? 'ข้อมูลตลิ่งของสถานี: ' + bankParts.join(' · ')
+        : 'แหล่งข้อมูลสถานีนี้ไม่ได้รายงานค่าระยะถึงตลิ่ง';
+      bankDetail.hidden = false;
     } catch (_) {
       if (state.selected && state.selected.lat === lat && state.selected.lon === lon) {
         $('#gaugeHeadline').textContent = 'ยังอ่านสถานีไม่ได้';
         $('#gaugeDetail').textContent = 'ข้อมูลระดับน้ำสดยังไม่พร้อม';
+        $('#gaugeBankDetail').hidden = true;
       }
     }
   }
@@ -374,12 +409,25 @@
       : valid.length ? ' ตรวจพบการเชื่อมต่อ ' + valid.length + ' แหล่ง' : ' ยังตรวจแหล่งข้อมูลไม่ได้';
     const empty = $('.source-not-ready span:last-child');
     if (empty) empty.textContent = stationCount
-      ? 'มีข้อมูลสถานีระดับน้ำ ' + stationCount + ' และสถานีฝน ' + (rainCount || 0) + ' แห่ง · การประเมินความเสี่ยงยังไม่พร้อม'
+      ? 'เชื่อมข้อมูลสถานีแล้ว: ระดับน้ำ ' + stationCount + ' แห่ง · ฝน ' + (rainCount || 0) + ' แห่ง · ค้นหาตำบลหรือแตะจุดบนแผนที่เพื่อดูข้อมูลพื้นที่'
       : valid.length
-      ? 'ตรวจพบการเชื่อมต่อแหล่งข้อมูลทางการ ' + valid.length + ' แหล่ง เลือกพื้นที่เพื่อดูข้อมูลที่ระบุตำแหน่งได้'
+      ? 'เชื่อมต่อแหล่งข้อมูลทางการ ' + valid.length + ' แหล่งแล้ว · ค้นหาตำบลหรือแตะจุดบนแผนที่เพื่อดูข้อมูลพื้นที่'
       : 'ยังไม่มีแหล่งข้อมูลทางการที่ผ่านการตรวจสอบ';
+    if (!state.selected) {
+      updateRiskStatusChip(stationCount ? 'ค้นหาพื้นที่' : valid.length ? 'รอเลือกพื้นที่' : 'กำลังตรวจข้อมูล',
+        stationCount || valid.length ? 'is-context' : 'is-unavailable');
+    }
     if (!state.selected && stationCount) $('#updatedAt').textContent =
-      'มีข้อมูลระดับน้ำและฝนที่สถานี · การประเมินความเสี่ยงยังไม่พร้อม';
+      'ข้อมูลสถานีเชื่อมต่อแล้ว · เลือกพื้นที่เพื่อดูสถานการณ์เฉพาะจุด';
+  }
+
+  function updateRiskStatusChip(label, stateName) {
+    const chip = $('#riskStatusChip');
+    if (!chip) return;
+    const status = chip.querySelector('.chip-state');
+    if (status) status.textContent = label;
+    chip.classList.remove('is-context', 'is-partial', 'is-evidence', 'is-unavailable');
+    chip.classList.add(stateName);
   }
 
   function renderRisk(risk, forecast, explanation) {
@@ -397,7 +445,7 @@
     $('#riskBadgeLabel').textContent = riskPresentation.label;
     $('#riskBadge').className = 'status-badge ' + riskPresentation.className;
     const confidenceLabels = { HIGH: 'สูง', MEDIUM: 'ปานกลาง', LOW: 'ต่ำ' };
-    const confidenceLevel = risk.confidence && risk.confidence.occurrence;
+    const confidenceLevel = occurrenceEligible && risk.confidence ? risk.confidence.occurrence : null;
     $('#occurrenceConfidence').textContent = confidenceLabels[confidenceLevel] || 'ยังประเมินไม่ได้';
     if (occurrenceEligible && risk.risk_level && risk.risk_level !== 'UNKNOWN') {
       const floodOutput = forecast.will_flood;
@@ -495,8 +543,8 @@
       local_rain: 'ฝนในพื้นที่', coastal_tidal: 'น้ำทะเลหนุน',
       compound: 'หลายปัจจัยร่วมกัน',
     };
-    const statusNames = { READY: 'มีหลักฐานในพื้นที่', PARTIAL: 'มีข้อมูลประกอบบางส่วน',
-      NOT_READY: 'ยังไม่มีหลักฐานเพียงพอ', NOT_APPLICABLE: 'ไม่เกี่ยวกับพื้นที่นี้' };
+    const statusNames = { READY: 'พบสัญญาณ', PARTIAL: 'มีข้อมูลบางส่วน',
+      NOT_READY: 'ยังไม่มีหลักฐาน', NOT_APPLICABLE: 'ไม่เกี่ยวกับพื้นที่' };
     const reasonNames = {
       SCOPED_OFFICIAL_WARNING: 'ประกาศทางการครอบคลุมจุดนี้',
       SCOPED_COASTAL_WARNING: 'ประกาศเตือนชายฝั่งครอบคลุมจุดนี้',
@@ -509,6 +557,8 @@
       WETNESS_UNVERIFIED: 'ยังขาดข้อมูลความชื้นสะสมที่ยืนยันแล้ว',
       HYDROLOGICALLY_CONNECTED_STAGE: 'พบสถานีระดับน้ำที่เชื่อมต่อผ่าน topology ของลำน้ำ',
       BANK_OR_THRESHOLD_NOT_VERIFIED: 'ยังไม่มีระดับตลิ่งหรือเกณฑ์ที่ยืนยันสำหรับจุดนี้',
+      SOURCE_REPORTED_BANK_REFERENCE: 'แหล่งข้อมูลรายงานระดับตลิ่งของสถานีและตรวจเทียบกับระดับน้ำแล้ว',
+      STATION_BANK_REFERENCE_NOT_SELECTED_LOCATION_THRESHOLD: 'ค่าตลิ่งนี้เป็นของสถานี ไม่ใช่เกณฑ์ของจุดที่เลือก',
       SAME_CATCHMENT_STAGE: 'มีสถานีระดับน้ำในลุ่มน้ำเดียวกัน',
       HYDRAULIC_LINK_UNVERIFIED: 'ยังไม่ยืนยันเส้นทางไฮดรอลิกจากสถานีถึงจุดนี้',
       RAINFALL_IS_CONTEXT_NOT_FLOOD_THRESHOLD: 'ค่าฝนใช้รายงานสถานการณ์ ยังไม่ใช่เกณฑ์น้ำท่วม',
@@ -524,31 +574,71 @@
       FEWER_THAN_TWO_SUPPORTED_PROCESSES: 'ยังไม่มีหลักฐานสองปัจจัยที่เกิดร่วมกัน',
     };
     const active = Object.entries(readiness.hazards || {}).filter(([, value]) => value.status === 'READY');
+    const supported = Object.entries(readiness.hazards || {}).filter(([, value]) =>
+      value.status === 'READY' || value.status === 'PARTIAL');
+    const evidence = (readiness.situation && readiness.situation.evidence) || {};
+    const reasonCodes = new Set(Object.values(readiness.hazards || {}).flatMap((value) => value.reasons || []));
+    const missingInputs = [];
+    if (reasonCodes.has('BANK_OR_THRESHOLD_NOT_VERIFIED')) missingInputs.push('ยังไม่มีระดับตลิ่งที่ยืนยัน');
+    if (reasonCodes.has('STATION_BANK_REFERENCE_NOT_SELECTED_LOCATION_THRESHOLD')) {
+      missingInputs.push('ทราบระดับตลิ่งของสถานีแล้ว แต่ยังใช้แทนเกณฑ์ของจุดที่เลือกไม่ได้');
+    }
+    if (reasonCodes.has('RAIN_TRIGGER_THRESHOLD_UNVERIFIED') ||
+        reasonCodes.has('NO_SCOPED_WARNING_OR_VERIFIED_RAIN_TRIGGER')) {
+      missingInputs.push('ยังไม่มีเกณฑ์ฝนหรือประกาศเตือนที่ยืนยัน');
+    }
+    const observationSummary = 'ระดับน้ำใกล้เคียง ' + (evidence.nearby_stage_count || 0) + ' สถานี' +
+      ' · ฝน ' + (evidence.nearby_rain_count || 0) + ' สถานี' +
+      ' · ประกาศที่ครอบคลุมจุดนี้ ' + (evidence.current_warning_count || 0) + ' รายการ';
     if (active.length) {
       $('#riskBadgeSymbol').textContent = '!';
       $('#riskBadgeLabel').textContent = 'พบหลักฐานในพื้นที่';
       $('#riskBadge').className = 'status-badge is-evidence';
       $('#riskHeadline').textContent = 'พบหลักฐานภัยที่ระบุถึงพื้นที่นี้';
       $('#riskSubhead').textContent = 'ตรวจพบ ' + active.map(([key]) => hazardNames[key]).join(', ') + ' · ยังไม่มีค่าความน่าจะเป็นน้ำท่วม';
+      $('#hazardValue').textContent = active.map(([key]) => hazardNames[key] || key).join(' · ');
+      updateRiskStatusChip('พบหลักฐาน', 'is-evidence');
     } else if (readiness.overall === 'PARTIAL') {
       $('#riskBadgeSymbol').textContent = '~';
-      $('#riskBadgeLabel').textContent = 'มีข้อมูลสถานการณ์';
+      $('#riskBadgeLabel').textContent = 'ข้อมูลสดบางส่วน';
       $('#riskBadge').className = 'status-badge is-partial';
-      $('#riskHeadline').textContent = 'รายงานสถานการณ์ได้บางส่วน';
-      $('#riskSubhead').textContent = 'มีหลักฐานตรวจวัด/บริบท แต่ยังไม่พอระบุระดับความเสี่ยงหรือเวลา';
+      $('#riskHeadline').textContent = 'เชื่อมข้อมูลพื้นที่แล้ว';
+      $('#riskSubhead').textContent = observationSummary + '. ' +
+        (missingInputs.length ? missingInputs.join(' · ') + ' จึงยังไม่คำนวณระดับเสี่ยงหรือเวลา' :
+          ' แสดงข้อมูลตรวจวัดประกอบได้ แต่ยังไม่มีตัวเลขพยากรณ์ที่ผ่านเกณฑ์');
+      $('#hazardValue').textContent = supported.length
+        ? 'ข้อมูลประกอบ ' + supported.length + ' ประเภท'
+        : 'ยังไม่พบหลักฐานภัย';
+      updateRiskStatusChip('ข้อมูลบางส่วน', 'is-partial');
     } else if (readiness.situation && readiness.situation.ready) {
       $('#riskBadgeSymbol').textContent = 'i';
       $('#riskBadgeLabel').textContent = 'รายงานสถานการณ์ได้';
       $('#riskBadge').className = 'status-badge is-partial';
-      $('#riskHeadline').textContent = 'มีข้อมูลสถานการณ์ แต่ยังประเมิน hazard ไม่ได้';
-      const evidence = readiness.situation.evidence || {};
-      $('#riskSubhead').textContent = 'สถานีระดับน้ำ ' + (evidence.nearby_stage_count || 0) +
-        ' · สถานีฝน ' + (evidence.nearby_rain_count || 0) +
-        ' · ประกาศปัจจุบัน ' + (evidence.current_warning_count || 0) + ' รายการ';
+      $('#riskHeadline').textContent = 'เชื่อมข้อมูลพื้นที่แล้ว';
+      $('#riskSubhead').textContent = observationSummary + ' · แสดงหลักฐานสถานการณ์ได้';
+      $('#hazardValue').textContent = supported.length
+        ? 'ข้อมูลประกอบ ' + supported.length + ' ประเภท'
+        : 'ข้อมูลสถานีใกล้เคียง';
+      updateRiskStatusChip('มีข้อมูล', 'is-partial');
+    } else {
+      $('#riskBadgeSymbol').textContent = '?';
+      $('#riskBadgeLabel').textContent = 'ยังไม่มีหลักฐานพอ';
+      $('#riskBadge').className = 'status-badge';
+      $('#riskHeadline').textContent = 'ยังสรุปสถานการณ์พื้นที่ไม่ได้';
+      $('#riskSubhead').textContent = 'ลองเลือกตำแหน่งอื่น หรือดูรายการเหตุผลด้านล่าง';
+      $('#hazardValue').textContent = 'ยังจำแนกประเภทภัยไม่ได้';
+      updateRiskStatusChip('ข้อมูลไม่พอ', 'is-unavailable');
     }
     const list = $('#uncertaintyList');
     list.replaceChildren();
     Object.entries(readiness.hazards || {}).forEach(([key, value]) => {
+      const row = document.querySelector('[data-hazard="' + key + '"]');
+      const rowStatus = row && row.querySelector('.hazard-status');
+      if (rowStatus) {
+        rowStatus.textContent = statusNames[value.status] || value.status;
+        rowStatus.dataset.status = value.status || 'UNKNOWN';
+        rowStatus.title = (value.reasons || []).map((reason) => reasonNames[reason] || reason).join('; ');
+      }
       const item = document.createElement('li');
       item.textContent = (hazardNames[key] || key) + ': ' + (statusNames[value.status] || value.status) +
         ' — ' + (value.reasons || []).map((reason) => reasonNames[reason] || reason).join('; ');
@@ -556,8 +646,8 @@
     });
     const situationStatus = readiness.situation && readiness.situation.status;
     $('#uncertaintyText').textContent = situationStatus && situationStatus !== 'NOT_READY'
-      ? 'รายงานสถานการณ์: ' + situationStatus + ' · hazard/ตัวเลขพยากรณ์ยังแยกตาม eligibility ของแต่ละผลลัพธ์'
-      : 'ความพร้อมของหลักฐานตามประเภทภัย ณ จุดที่เลือก · ไม่มีตัวเลขพยากรณ์ที่ผ่านเกณฑ์';
+      ? 'อ่านสถานการณ์พื้นที่ได้แล้ว · ตัวเลขพยากรณ์จะแสดงเมื่อข้อมูลสำคัญผ่านเกณฑ์'
+      : 'แสดงหลักฐานแยกตามประเภทภัย · ขณะนี้ยังไม่มีตัวเลขพยากรณ์ที่ผ่านเกณฑ์';
   }
 
   function formatOutput(output, format) {
@@ -597,11 +687,84 @@
     $('#expertEligibility').innerHTML = rows.join('');
     const sources = (quality && quality.source_registry) || [];
     const health = new Map(((quality && quality.source_health) || []).map((item) => [item.source_id, item]));
+    const stage = health.get('thaiwater_v3') || {};
+    const rain = health.get('thaiwater_rain_24h') || {};
+    const stageCount = Number(stage.details && stage.details.parsed_station_count) || 0;
+    const rainCount = Number(rain.details && rain.details.parsed_station_count) || 0;
+    $('#expertSourceSummary').innerHTML = stageCount || rainCount
+      ? '<strong>ดึงข้อมูลตรวจวัดจริงแล้ว</strong><span>' +
+        (stageCount ? 'ระดับน้ำ ' + stageCount.toLocaleString('th-TH') + ' สถานี' : '') +
+        (stageCount && rainCount ? ' · ' : '') +
+        (rainCount ? 'ฝน ' + rainCount.toLocaleString('th-TH') + ' สถานี' : '') +
+        '</span><small>สถานะผิดพลาดด้านล่างเป็นคนละชุดข้อมูลหรือเส้นทางสำรอง ไม่ได้ลบล้างข้อมูลสถานีที่ดึงสำเร็จ</small>'
+      : '<strong>ยังไม่พบข้อมูลสถานีที่ดึงสำเร็จ</strong><span>ตรวจสถานะของแต่ละชุดข้อมูลด้านล่าง</span>';
     $('#expertSources').innerHTML = sources.map((source) =>
-      '<div class="source-row"><span class="source-state-dot"></span><div><strong>' + escapeHtml(source.provider) + ' · ' +
-      escapeHtml((health.get(source.source_id) || {}).state || source.status) + '</strong><small>' +
-      escapeHtml((health.get(source.source_id) || {}).blocker || source.blocker || '') + '</small></div></div>'
+      renderSourceRow(source, health.get(source.source_id) || {})
     ).join('') || '<span>ไม่มีรายการแหล่งข้อมูล</span>';
+  }
+
+  const sourceNames = {
+    hii_catalog: 'คลังระดับน้ำย้อนหลัง', hii_legacy_daily: 'รายงานระดับน้ำรายวัน · สำรอง',
+    hii_legacy_graph: 'กราฟระดับน้ำรายสถานี · สำรอง', hii_public_warning: 'ประกาศเตือนระดับน้ำ',
+    thaiwater_v3: 'สถานีวัดระดับน้ำสด', thaiwater_rain_24h: 'สถานีฝนสะสม 24 ชั่วโมง',
+    dwr_ews_warnings: 'ประกาศเตือน DWR', dwr_ews_station: 'ข้อมูลรายสถานี DWR · สำรอง',
+    dwr_southwest: 'โทรมาตรภาคตะวันตกเฉียงใต้ · สำรอง', tmd_radar_discovery: 'ค้นหาผลิตภัณฑ์เรดาร์',
+    tmd_qpe_ascii: 'ฝนเชิงพื้นที่ QPE · สำรอง', rid_dam: 'สถานะเขื่อนขนาดใหญ่',
+    rid_reservoir: 'สถานะอ่างเก็บน้ำขนาดกลาง', navy_tide: 'ตารางระดับน้ำทะเลคาดการณ์',
+    gistda_flood: 'ข้อมูลน้ำท่วมจากดาวเทียม', imerg: 'ฝนดาวเทียม NASA GPM',
+    hydrosheds: 'ภูมิประเทศและทิศทางการไหล', hydrobasins: 'ขอบเขตลุ่มน้ำ',
+    hydrorivers: 'โครงข่ายแม่น้ำธรรมชาติ', dpm_hydrology: 'โครงข่ายลำน้ำอ้างอิง DPM',
+    ldd_landuse_admin: 'การใช้ที่ดินและดินระดับพื้นที่',
+    ldd_landuse_subbasin: 'การใช้ที่ดินและดินระดับลุ่มน้ำ', ldd_soil_query: 'ค้นหาดิน ณ จุดที่เลือก',
+  };
+
+  const sourceStateNames = {
+    VALID: 'ดึงข้อมูลได้', VALID_ZERO: 'เชื่อมต่อได้ · ไม่มีรายการ',
+    SOURCE_ERROR: 'เส้นทางนี้มีปัญหา', NOT_CONFIGURED: 'ยังไม่ตั้งค่า',
+    NOT_SUPPORTED: 'รูปแบบชุดข้อมูลยังไม่รองรับ', MISSING: 'ไม่มีข้อมูล',
+    STALE: 'ข้อมูลเก่า', SUSPECT: 'ข้อมูลต้องตรวจสอบ', ESTIMATED: 'ค่าประมาณ',
+  };
+
+  function sourceDetail(source, item) {
+    const details = item.details || {};
+    const count = (key) => Number(details[key]) || 0;
+    if (item.state === 'VALID_ZERO' && source.source_id === 'hii_catalog') {
+      return 'หน้าแค็ตตาล็อกทำงาน แต่ไม่พบไฟล์ดาวน์โหลดคลังย้อนหลัง; ระดับน้ำสดดึงจาก ThaiWater แล้ว';
+    }
+    if (item.state === 'VALID') {
+      if (source.source_id === 'thaiwater_v3') {
+        return 'อ่านได้ ' + count('parsed_station_count').toLocaleString('th-TH') + ' สถานี' +
+          (details.with_msl_count != null ? ' · มีค่าระดับอ้างอิง MSL ' + count('with_msl_count').toLocaleString('th-TH') + ' สถานี' : '');
+      }
+      if (source.source_id === 'thaiwater_rain_24h') {
+        return 'อ่านได้ ' + count('parsed_station_count').toLocaleString('th-TH') + ' สถานี · ยังใช้ยืนยันตัวเลขพยากรณ์ฝนไม่ได้จนกว่าจะตรวจสอบเวลา/หน่วย';
+      }
+      if (details.parsed_recent_warning_count != null) return 'เชื่อมต่อประกาศได้ · อ่านรายการล่าสุด ' + count('parsed_recent_warning_count').toLocaleString('th-TH') + ' รายการ';
+      if (details.record_count != null) return 'เชื่อมต่อและอ่านข้อมูลได้ ' + count('record_count').toLocaleString('th-TH') + ' รายการ';
+      if (source.source_id === 'navy_tide') return 'พบตารางระดับน้ำทะเล ' + count('msl_resources').toLocaleString('th-TH') + ' ชุด · ต้องนำเข้ารายการพยากรณ์ก่อนใช้คำนวณ';
+      if (source.source_id === 'ldd_soil_query') return 'ชั้นข้อมูลตอบสนองแล้ว; ระบบค้นค่าดินแยกเมื่อเลือกตำแหน่ง';
+      if (source.source_id === 'dwr_ews_station') return 'พบหน้าอย่างน้อยหนึ่งสถานี; ยังไม่ยืนยันความหมาย/หน่วยเพื่อใช้คำนวณ';
+      return item.blocker || 'ตรวจพบการเชื่อมต่อ';
+    }
+    const message = item.blocker || source.message || '';
+    if (source.source_id === 'hii_legacy_daily' && item.state === 'SOURCE_ERROR') return 'รายงาน HII เส้นทางสำรองหมดเวลาตอบสนอง; สถานีระดับน้ำ ThaiWater ยังใช้งานได้';
+    if (source.source_id === 'dwr_ews_station' && item.state === 'SOURCE_ERROR') return 'รหัสสถานีทดสอบยังยืนยันตัวตนไม่ได้ จึงไม่รับค่าจากชุดนี้; ประกาศเตือน DWR แยกต่างหากยังเชื่อมต่อได้';
+    if (source.source_id === 'dwr_southwest' && item.state === 'SOURCE_ERROR') return 'พอร์ทัลเสริมนี้เชื่อมต่อไม่ได้ในรอบตรวจนี้';
+    if (source.source_id === 'tmd_qpe_ascii' && item.state === 'SOURCE_ERROR') return 'ลิงก์ฝน QPE ที่ค้นพบใช้งานไม่ได้ในรอบนี้; เป็นข้อมูลเสริมจากสถานีฝน ThaiWater';
+    if (source.source_id === 'hii_legacy_graph' && item.state === 'NOT_CONFIGURED') return 'ต้องยืนยันรหัสและชื่อสถานีก่อนเรียกกราฟ; ไม่กระทบข้อมูลสถานี ThaiWater';
+    if (message.includes('disabled by default') || message.includes('ปิดใช้งานตามค่าเริ่มต้น')) return 'ปิดการใช้งานตามค่าเริ่มต้น';
+    if (message.includes('TimeoutError')) return 'หมดเวลาขณะตรวจเส้นทางเสริม';
+    if (message.includes('URLError')) return 'เชื่อมต่อเส้นทางนี้ไม่ได้ในรอบตรวจ';
+    return message || 'ยังไม่มีผลตรวจแหล่งข้อมูล';
+  }
+
+  function renderSourceRow(source, item) {
+    const state = item.state || source.status || 'NOT_CONFIGURED';
+    const name = sourceNames[source.source_id] || source.dataset || source.source_id;
+    return '<div class="source-row" data-state="' + escapeHtml(state) + '"><span class="source-state-dot"></span><div>' +
+      '<strong>' + escapeHtml(source.provider) + ' · ' + escapeHtml(name) + '</strong>' +
+      '<span class="source-state-label">' + escapeHtml(sourceStateNames[state] || state) + '</span>' +
+      '<small>' + escapeHtml(sourceDetail(source, { ...item, state })) + '</small></div></div>';
   }
 
   function escapeHtml(value) {

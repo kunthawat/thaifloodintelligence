@@ -7,7 +7,7 @@
     <meta name="description" content="แผนที่ติดตามสถานการณ์น้ำและความเสี่ยงน้ำท่วมทั่วประเทศไทย" />
     <title>Thai Flood Intelligence</title>
     <link rel="stylesheet" href="/assets/vendor/maplibre-gl.css" />
-    <link rel="stylesheet" href="/assets/app.css?v=4" />
+    <link rel="stylesheet" href="/assets/app.css?v=8" />
   </head>
   <body>
     <div class="app-shell">
@@ -39,7 +39,7 @@
             <div class="map-vignette" aria-hidden="true"></div>
 
             <div class="map-top-chips" aria-label="สถานะชั้นข้อมูล">
-              <button class="map-chip is-unavailable" type="button" data-layer-shortcut="risk"><span class="chip-dot dot-risk">?</span><span>ความเสี่ยง</span><span class="chip-state">ข้อมูลไม่พอ</span></button>
+              <div id="riskStatusChip" class="map-chip map-chip-static is-context" role="status" aria-live="polite"><span class="chip-dot dot-risk">⌖</span><span>สถานะพื้นที่</span><span class="chip-state">เลือกพื้นที่</span></div>
               <button class="map-chip" type="button" data-layer-shortcut="flow"><span class="chip-dot dot-flow">↗</span><span>โครงข่ายลำน้ำ</span><span class="chip-state">กำลังแสดง</span></button>
               <button class="map-chip" type="button" data-layer-shortcut="gauges"><span class="chip-dot dot-flow">◉</span><span>สถานีระดับน้ำ</span><span class="chip-state">กดเพื่อแสดง</span></button>
             </div>
@@ -87,7 +87,7 @@
 
         <aside id="locationPanel" class="location-panel" aria-label="สรุปความเสี่ยงพื้นที่">
           <button id="sheetHandle" class="sheet-handle" type="button" aria-label="ขยายหรือย่อแผงข้อมูล"></button>
-          <div class="panel-scroll">
+          <div class="panel-scroll" tabindex="0" role="region" aria-label="ข้อมูลสถานการณ์พื้นที่">
             <div class="panel-topline"><span class="eyebrow">THAILAND FLOOD INTELLIGENCE</span><span class="live-status"><span></span> ข้อมูลสดยังไม่พร้อม</span></div>
             <div id="emptyState" class="empty-state">
               <div class="empty-illustration" aria-hidden="true"><span class="pin-ring"></span><span class="pin-stem"></span></div>
@@ -95,7 +95,7 @@
               <h1>สถานการณ์น้ำใกล้คุณ</h1>
               <p>แตะตำแหน่งบนแผนที่ หรือค้นหาตำบล อำเภอ จังหวัด และพิกัด</p>
               <button id="emptyLocateButton" class="outline-button" type="button"><span aria-hidden="true">◎</span> ใช้ตำแหน่งปัจจุบัน</button>
-              <div class="source-not-ready"><span class="source-icon">i</span><span>กำลังตรวจสอบแหล่งข้อมูลทางการ</span></div>
+              <div class="source-not-ready"><span class="source-icon">i</span><span>กำลังเชื่อมข้อมูลล่าสุด · ค้นหาตำบลหรือแตะจุดบนแผนที่เพื่อดูสถานการณ์</span></div>
             </div>
 
             <div id="selectedState" hidden>
@@ -111,7 +111,7 @@
                 <p id="riskSubhead">ข้อมูลตรวจวัดและแบบจำลองที่จำเป็นยังไม่พร้อม</p>
                 <div class="answer-grid">
                   <div class="answer-cell"><span class="answer-icon impact-icon">◷</span><span class="answer-label">เริ่มกระทบ</span><strong id="impactValue">ยังประเมินเวลาไม่ได้</strong></div>
-                  <div class="answer-cell"><span class="answer-icon hazard-icon">⌁</span><span class="answer-label">ภัยหลัก</span><strong id="hazardValue">ข้อมูลไม่พอจำแนกภัย</strong></div>
+                  <div class="answer-cell"><span class="answer-icon hazard-icon">⌁</span><span class="answer-label">ข้อมูลที่พบ</span><strong id="hazardValue">รอผลตรวจพื้นที่</strong></div>
                 </div>
                 <div class="uncertainty-note"><span class="uncertainty-mark">?</span><span id="uncertaintyText">ข้อมูลที่ขาดหายไม่ถือว่าเป็นความเสี่ยงต่ำหรือไม่มีน้ำท่วม</span></div>
                 <div id="multiWaveNotice" class="multi-wave-notice" hidden>ระดับน้ำกำลังลดลงชั่วคราว แต่ยังมีมวลน้ำอีกระลอกจากต้นน้ำ</div>
@@ -124,7 +124,7 @@
 
               <section class="official-card" aria-live="polite">
                 <div class="official-icon" aria-hidden="true">◉</div>
-                <div><span class="eyebrow">สถานีระดับน้ำใกล้เคียง · ThaiWater</span><strong id="gaugeHeadline">กำลังอ่านสถานี</strong><p id="gaugeDetail">ค่าที่สถานีไม่ใช่ค่าระดับน้ำ ณ จุดที่เลือก</p></div>
+                <div><span class="eyebrow">สถานีระดับน้ำใกล้เคียง · ThaiWater</span><strong id="gaugeHeadline">กำลังอ่านสถานี</strong><p id="gaugeDetail">ค่าที่สถานีไม่ใช่ค่าระดับน้ำ ณ จุดที่เลือก</p><p id="gaugeBankDetail" class="gauge-bank-detail" hidden></p></div>
               </section>
 
               <section class="official-card" aria-live="polite">
@@ -141,11 +141,11 @@
               <section class="hazard-section">
                 <div class="section-title-row"><h2>ปัจจัยที่ควรติดตาม</h2><span class="muted-count">5 ประเภท</span></div>
                 <div class="hazard-list">
-                  <div class="hazard-row"><span class="hazard-symbol river-symbol">≈</span><span>น้ำล้นตลิ่ง</span><strong>ยังประเมินไม่ได้</strong></div>
-                  <div class="hazard-row"><span class="hazard-symbol flash-symbol">↯</span><span>น้ำป่าไหลหลาก</span><strong>ยังประเมินไม่ได้</strong></div>
-                  <div class="hazard-row"><span class="hazard-symbol rain-symbol">☂</span><span>น้ำท่วมจากฝนในพื้นที่</span><strong>ยังประเมินไม่ได้</strong></div>
-                  <div class="hazard-row"><span class="hazard-symbol coast-symbol">≋</span><span>น้ำทะเลหนุน</span><strong>ยังประเมินไม่ได้</strong></div>
-                  <div class="hazard-row"><span class="hazard-symbol compound-symbol">✳</span><span>น้ำท่วมหลายปัจจัยร่วมกัน</span><strong>ยังประเมินไม่ได้</strong></div>
+                  <div class="hazard-row" data-hazard="river_overflow"><span class="hazard-symbol river-symbol">≈</span><span>น้ำล้นตลิ่ง</span><strong class="hazard-status">รอเลือกพื้นที่</strong></div>
+                  <div class="hazard-row" data-hazard="flash_flood"><span class="hazard-symbol flash-symbol">↯</span><span>น้ำป่าไหลหลาก</span><strong class="hazard-status">รอเลือกพื้นที่</strong></div>
+                  <div class="hazard-row" data-hazard="local_rain"><span class="hazard-symbol rain-symbol">☂</span><span>น้ำท่วมจากฝนในพื้นที่</span><strong class="hazard-status">รอเลือกพื้นที่</strong></div>
+                  <div class="hazard-row" data-hazard="coastal_tidal"><span class="hazard-symbol coast-symbol">≋</span><span>น้ำทะเลหนุน</span><strong class="hazard-status">รอเลือกพื้นที่</strong></div>
+                  <div class="hazard-row" data-hazard="compound"><span class="hazard-symbol compound-symbol">✳</span><span>น้ำท่วมหลายปัจจัยร่วมกัน</span><strong class="hazard-status">รอเลือกพื้นที่</strong></div>
                 </div>
               </section>
 
@@ -177,6 +177,7 @@
                 <div class="expert-heading"><span class="eyebrow">EXPERT MODE</span><h2>คุณภาพข้อมูลและเกณฑ์พยากรณ์</h2></div>
                 <div id="expertEligibility" class="eligibility-list"></div>
                 <div class="expert-subheading">แหล่งข้อมูล</div>
+                <div id="expertSourceSummary" class="source-summary"></div>
                 <div id="expertSources" class="expert-source-list"><span>กำลังอ่านทะเบียนแหล่งข้อมูล…</span></div>
               </div>
             </div>
@@ -196,6 +197,6 @@
       </footer>
     </div>
     <script src="/assets/vendor/maplibre-gl.js" defer></script>
-    <script src="/assets/app.js?v=15" defer></script>
+    <script src="/assets/app.js?v=21" defer></script>
   </body>
 </html>

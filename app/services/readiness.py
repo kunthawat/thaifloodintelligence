@@ -54,7 +54,9 @@ def _distance_km(lat: float, lon: float, row: dict) -> float:
 
 def _nearby(cache: dict | None, lat: float, lon: float, maximum_km: float,
             observation_max_age_hours: float = 6) -> list[dict]:
-    if not cache:
+    # Stale station snapshots remain visible on the map, but they cannot support
+    # a current situation or hazard assessment.
+    if not cache or cache.get("stale"):
         return []
     fetch_age = _age_hours(cache.get("fetched_at"))
     if fetch_age is None or fetch_age > 24:
@@ -157,6 +159,25 @@ def _situation_status(*, warnings: dict, stage: list[dict], rain: list[dict], ca
     }
 
 
+def _ingested_tide_available() -> bool:
+    """A reachable Navy index is not boundary evidence until predictions were parsed and stored."""
+    if not configured_database_url():
+        return False
+    try:
+        with psycopg.connect(configured_database_url(), connect_timeout=3) as connection, connection.cursor() as cursor:
+            cursor.execute("""SELECT EXISTS(
+                SELECT 1 FROM observations
+                WHERE source_id='navy_tide'
+                  AND variable='PREDICTED_TIDE_LEVEL'
+                  AND observation_type='FORECAST'
+                  AND quality_state IN ('VALID','ESTIMATED')
+                  AND observed_at BETWEEN now()-interval '12 hours' AND now()+interval '14 days'
+            )""")
+            return bool(cursor.fetchone()[0])
+    except psycopg.Error:
+        return False
+
+
 def location_readiness(lat: float, lon: float, catchment: dict | None = None) -> dict[str, Any]:
     admin = location_admin(lat, lon)
     warnings = scoped_warnings(lat, lon)
@@ -185,14 +206,33 @@ def location_readiness(lat: float, lon: float, catchment: dict | None = None) ->
     if river_warning:
         river = _result(_warning_status(river_warning), ["SCOPED_OFFICIAL_WARNING"], river_warning)
     elif connected_stage:
+        bank_verified_stage = [row for row in connected_stage
+                               if row.get("bank_reference_quality") == "RUNTIME_CROSSCHECKED"
+                               and row.get("bank_level_msl_m") is not None]
+        bank_evidence = [{
+            "source": "ThaiWater",
+            "station_id": row.get("station_id"),
+            "station_code": row.get("station_code"),
+            "observed_at_source": row.get("observed_at_source"),
+            "waterlevel_msl_m": row.get("waterlevel_msl_m"),
+            "bank_distance_m": row.get("bank_distance_m"),
+            "bank_relation_text": row.get("bank_relation_text"),
+            "bank_level_msl_m": row.get("bank_level_msl_m"),
+            "bank_reference_validation": row.get("bank_reference_validation"),
+            "hydraulic_relation": row.get("hydraulic_relation"),
+            "station_reach_id": row.get("station_reach_id"),
+            "target_reach_id": row.get("target_reach_id"),
+            "distance_km_approx": row.get("distance_km_approx"),
+        } for row in (bank_verified_stage or connected_stage)]
+        reasons = ["HYDROLOGICALLY_CONNECTED_STAGE"]
+        reasons.append("SOURCE_REPORTED_BANK_REFERENCE" if bank_verified_stage else
+                       "BANK_OR_THRESHOLD_NOT_VERIFIED")
+        if bank_verified_stage:
+            reasons.append("STATION_BANK_REFERENCE_NOT_SELECTED_LOCATION_THRESHOLD")
         river = _result(
             "PARTIAL",
-            ["HYDROLOGICALLY_CONNECTED_STAGE", "BANK_OR_THRESHOLD_NOT_VERIFIED"],
-            [{"source": "ThaiWater", "station_id": row.get("station_id"),
-              "hydraulic_relation": row.get("hydraulic_relation"),
-              "station_reach_id": row.get("station_reach_id"),
-              "target_reach_id": row.get("target_reach_id"),
-              "distance_km_approx": row.get("distance_km_approx")} for row in connected_stage],
+            reasons,
+            bank_evidence,
         )
     elif basin_stage:
         river = _result(
@@ -233,21 +273,24 @@ def location_readiness(lat: float, lon: float, catchment: dict | None = None) ->
 
     province = (admin or {}).get("prov_name_th")
     tide_health = cached_source_health("navy_tide")
-    if coastal_warning:
+    tide_ingested = _ingested_tide_available()
+    if province not in _COASTAL_PROVINCES:
+        coastal = _result("NOT_APPLICABLE", ["LOCATION_NOT_IN_COASTAL_PROVINCE"])
+    elif coastal_warning:
         coastal = _result(_warning_status(coastal_warning), ["SCOPED_COASTAL_WARNING"], coastal_warning)
-    elif province in _COASTAL_PROVINCES and tide_health.get("state") == "VALID":
+    elif tide_ingested:
         coastal = _result(
             "PARTIAL",
-            ["TIDE_PREDICTION_SOURCE_AVAILABLE", "DOWNSTREAM_BOUNDARY_PROPAGATION_UNVERIFIED"],
+            ["INGESTED_TIDE_PREDICTION_AVAILABLE", "DOWNSTREAM_BOUNDARY_PROPAGATION_UNVERIFIED"],
             [{"source": "navy_tide", "state": tide_health.get("state"),
               "last_observation": tide_health.get("last_observation")}],
         )
     else:
-        coastal = _result("NOT_READY", ["NO_VERIFIED_COASTAL_BOUNDARY_OR_TIDE_EVIDENCE"])
+        coastal = _result("NOT_READY", ["NO_INGESTED_COASTAL_BOUNDARY_OR_TIDE_PREDICTION"])
 
     processes = [row for row in (river, flash, coastal, local_rain) if row["status"] in ("READY", "PARTIAL")]
     compound = (
-        _result("PARTIAL", ["MULTIPLE_PROCESSES_WITH_INCOMPLETE_LINKAGE"])
+        _result("PARTIAL", ["MULTIPLE_PROCESS_EVIDENCE_ONLY", "COMPOUND_LINKAGE_NOT_CALIBRATED"])
         if len(processes) >= 2 else _result("NOT_READY", ["FEWER_THAN_TWO_SUPPORTED_PROCESSES"])
     )
 
@@ -266,8 +309,11 @@ def location_readiness(lat: float, lon: float, catchment: dict | None = None) ->
     limitations: list[str] = []
     if usable_stage and not connected_stage:
         limitations.append("STAGE_STATION_HYDRAULIC_LINK_NOT_VERIFIED")
-    if connected_stage:
+    if connected_stage and not any(row.get("bank_reference_quality") == "RUNTIME_CROSSCHECKED"
+                                   for row in connected_stage):
         limitations.append("CONNECTED_STAGE_DOES_NOT_IMPLY_FLOOD_WITHOUT_BANK_THRESHOLD")
+    if any(row.get("bank_reference_quality") == "RUNTIME_CROSSCHECKED" for row in connected_stage):
+        limitations.append("STATION_BANK_REFERENCE_NOT_TRANSFERRED_TO_SELECTED_LOCATION")
     if measured_rain:
         limitations.append("RAINFALL_CONTEXT_NOT_CALIBRATED_FLOOD_TRIGGER")
     if warnings.get("reason") == "WARNING_SOURCE_STALE":

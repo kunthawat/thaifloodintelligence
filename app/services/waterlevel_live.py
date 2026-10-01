@@ -17,6 +17,8 @@ from app.settings import ROOT
 URL = "https://api-v3.thaiwater.net/api/v1/thaiwater30/public/waterlevel_load"
 CACHE = ROOT / "data" / "static" / "live" / "thaiwater_waterlevel.json"
 MAX_AGE_SECONDS = 600
+PARSER_VERSION = "thaiwater-waterlevel-v2-bank"
+BANK_CROSSCHECK_TOLERANCE_M = 0.035
 _lock = threading.Lock()
 
 
@@ -32,6 +34,49 @@ def _name(value):
     if isinstance(value, dict):
         return value.get("th") or value.get("en") or ""
     return value or ""
+
+
+def _bank_reference(row: dict, station: dict) -> dict:
+    """Keep source bank fields; promote a bank elevation only after cross-checking it."""
+    distance = _number(row.get("diff_wl_bank"))
+    relation = row.get("diff_wl_bank_text")
+    relation = relation.strip() if isinstance(relation, str) and relation.strip() else None
+    min_bank = _number(station.get("min_bank"))
+    stage_msl = _number(row.get("waterlevel_msl"))
+    text = (relation or "").casefold()
+    direction = None
+    if "ต่ำกว่าตลิ่ง" in text or "below bank" in text:
+        direction = "BELOW_BANK"
+    elif any(token in text for token in ("ล้นตลิ่ง", "สูงกว่าตลิ่ง", "above bank", "over bank")):
+        direction = "ABOVE_BANK"
+
+    validation_method = None
+    bank_level_msl = None
+    if direction and distance is not None and min_bank is not None and stage_msl is not None:
+        magnitude = abs(distance)
+        derived = stage_msl + magnitude if direction == "BELOW_BANK" else stage_msl - magnitude
+        if abs(derived - min_bank) <= BANK_CROSSCHECK_TOLERANCE_M:
+            bank_level_msl = min_bank
+            validation_method = (
+                "waterlevel_msl + diff_wl_bank matches station.min_bank"
+                if direction == "BELOW_BANK" else
+                "waterlevel_msl - diff_wl_bank matches station.min_bank"
+            )
+
+    has_bank_data = any(value is not None for value in (
+        distance, min_bank, _number(station.get("left_bank")), _number(station.get("right_bank"))
+    ))
+    return {
+        "bank_distance_m": abs(distance) if distance is not None else None,
+        "bank_relation_text": relation,
+        "source_bank_min_m": min_bank,
+        "source_bank_left_m": _number(station.get("left_bank")),
+        "source_bank_right_m": _number(station.get("right_bank")),
+        "bank_level_msl_m": bank_level_msl,
+        "bank_reference_quality": "RUNTIME_CROSSCHECKED" if bank_level_msl is not None else
+                                  "SOURCE_REPORTED_UNVERIFIED" if has_bank_data else None,
+        "bank_reference_validation": validation_method,
+    }
 
 
 def _normalize(payload: dict) -> list[dict]:
@@ -60,6 +105,7 @@ def _normalize(payload: dict) -> list[dict]:
             "waterlevel_msl_m": _number(row.get("waterlevel_msl")),
             "waterlevel_station_m": _number(row.get("waterlevel_m")),
             "source_situation_level": row.get("situation_level"),
+            **_bank_reference(row, station),
         })
     if not records:
         raise ValueError("ThaiWater returned no geolocated station records")
@@ -68,7 +114,9 @@ def _normalize(payload: dict) -> list[dict]:
 
 def _read_cache() -> dict | None:
     try:
-        return json.loads(CACHE.read_text(encoding="utf-8"))
+        cached = json.loads(CACHE.read_text(encoding="utf-8"))
+        age = time.time() - CACHE.stat().st_mtime
+        return {**cached, "stale": age >= MAX_AGE_SECONDS}
     except (FileNotFoundError, ValueError, OSError):
         return None
 
@@ -77,7 +125,7 @@ def snapshot() -> dict:
     with _lock:
         cached = _read_cache()
         age = time.time() - CACHE.stat().st_mtime if cached else float("inf")
-        if cached and age < MAX_AGE_SECONDS:
+        if cached and age < MAX_AGE_SECONDS and cached.get("parser_version") == PARSER_VERSION:
             return {**cached, "stale": False}
         try:
             request = Request(URL, headers={"Accept": "application/json", "User-Agent": "ThailandFloodIntelligence/0.1"})
@@ -88,7 +136,7 @@ def snapshot() -> dict:
             result = {"source": URL, "fetched_at": datetime.now(timezone.utc).isoformat(),
                       "last_success_at": datetime.now(timezone.utc).isoformat(),
                       "source_timezone": "UNVERIFIED", "stations": records,
-                      "raw_hash": raw_hash, "parser_version": "thaiwater-waterlevel-v1",
+                      "raw_hash": raw_hash, "parser_version": PARSER_VERSION,
                       "quality_state": "PARTIAL"}
             CACHE.parent.mkdir(parents=True, exist_ok=True)
             temporary = CACHE.with_suffix(".tmp")

@@ -175,7 +175,7 @@ def import_hydrorivers(report: dict[str, Any]) -> dict[str, Any]:
                        VALUES (%s,'JUNCTION',NULL,'HydroRIVERS',%s,
                          ST_Transform(ST_SetSRID(ST_MakePoint(%s,%s),%s),4326),0.35,%s)
                        ON CONFLICT (node_id) DO UPDATE SET geom=EXCLUDED.geom,properties=EXCLUDED.properties""",
-                    (node_ids[row["id"]], row["id"], lon, lat, row["epsg"], Jsonb({"source_fields": row["props"], "topology_status": "source-derived; hydraulic direction remains dynamic"})),
+                    (node_ids[row["id"]], row["id"], lon, lat, row["epsg"], Jsonb({"source_fields": row["props"], "topology_status": "NEXT_DOWN verifies topological downstream; realtime hydraulic direction is not verified"})),
                 )
                 if row["id"] in outlet_ids:
                     end_lon, end_lat = row["ends"][1]
@@ -194,16 +194,16 @@ def import_hydrorivers(report: dict[str, Any]) -> dict[str, Any]:
                 cursor.execute(
                     """INSERT INTO network_edges(edge_id,edge_type,canonical_name,from_node_id,to_node_id,direction_type,
                         geom,length_m,network_confidence,hydraulic_parameters_verified,properties)
-                       VALUES (%s,'RIVER_REACH',NULL,%s,%s,'DYNAMIC',
+                       VALUES (%s,'RIVER_REACH',NULL,%s,%s,'FORWARD',
                          ST_Multi(ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(%s),%s),4326)),%s,0.35,false,%s)
                        ON CONFLICT (edge_id) DO UPDATE SET from_node_id=EXCLUDED.from_node_id,to_node_id=EXCLUDED.to_node_id,
-                         direction_type='DYNAMIC',geom=EXCLUDED.geom,length_m=EXCLUDED.length_m,
+                         direction_type='FORWARD',geom=EXCLUDED.geom,length_m=EXCLUDED.length_m,
                          network_confidence=EXCLUDED.network_confidence,hydraulic_parameters_verified=false,properties=EXCLUDED.properties""",
                     (edge_id, node_ids[reach], target_id, json.dumps(row["geometry"]), row["epsg"], float(length) * 1000 if length is not None else None,
-                     Jsonb({"source": "HydroRIVERS", "source_id": "hydrorivers", "source_fields": row["props"], "next_down_provider_id": row["next"], "hydraulic_parameters_verified": False, "artificial_canal": False})),
+                     Jsonb({"source": "HydroRIVERS", "source_id": "hydrorivers", "source_fields": row["props"], "next_down_provider_id": row["next"], "topology_direction_verified": True, "realtime_hydraulic_direction_verified": False, "hydraulic_parameters_verified": False, "artificial_canal": False})),
                 )
             _insert_schema_version(cursor, "hydrorivers", vector_files, {"reach_count": len(rows), "topology_field": "NEXT_DOWN", "artificial_canal_inference": False})
-    return {"source_id": "hydrorivers", "reaches": len(rows), "nodes": len(node_ids) + len(outlet_ids), "network_confidence": 0.35, "direction_type": "DYNAMIC", "hydraulic_parameters_verified": False}
+    return {"source_id": "hydrorivers", "reaches": len(rows), "nodes": len(node_ids) + len(outlet_ids), "network_confidence": 0.35, "direction_type": "FORWARD", "hydraulic_parameters_verified": False}
 
 
 def _line_ends(geometry: dict[str, Any]) -> tuple[tuple[float, float], tuple[float, float]]:

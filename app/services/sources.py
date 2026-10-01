@@ -155,9 +155,38 @@ def source_health() -> list[dict[str, Any]]:
     return rows
 
 
+def _latest_persisted_health(source_id: str) -> dict[str, Any]:
+    from app.settings import configured_database_url
+    url = configured_database_url()
+    if not url:
+        return {}
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+        with psycopg.connect(url, connect_timeout=2, row_factory=dict_row) as connection, connection.cursor() as cursor:
+            cursor.execute("""SELECT status::text AS status,checked_at,last_observed_at,last_success_at,
+                                     error_message,details
+                              FROM source_health WHERE source_id=%s
+                              ORDER BY checked_at DESC LIMIT 1""", (source_id,))
+            row = cursor.fetchone()
+            if not row:
+                return {}
+            return {
+                "status": row["status"],
+                "freshness": (row.get("details") or {}).get("freshness", "UNKNOWN"),
+                "last_observation": row["last_observed_at"].isoformat() if row.get("last_observed_at") else None,
+                "last_check": row["checked_at"].isoformat() if row.get("checked_at") else None,
+                "last_success": row["last_success_at"].isoformat() if row.get("last_success_at") else None,
+                "message": row.get("error_message"),
+                "details": row.get("details") or {},
+            }
+    except Exception:
+        return {}
+
+
 def cached_source_health(source_id: str) -> dict[str, Any]:
-    """Return one in-process source check without rebuilding the full registry."""
-    health = _HEALTH_CACHE.get(source_id, {})
+    """Return in-process health, falling back to the latest persisted check after restart."""
+    health = _HEALTH_CACHE.get(source_id) or _latest_persisted_health(source_id)
     return {
         "source_id": source_id,
         "state": health.get("status", "UNKNOWN"),
@@ -165,7 +194,22 @@ def cached_source_health(source_id: str) -> dict[str, Any]:
         "last_observation": health.get("last_observation"),
         "checked_at": health.get("last_check"),
         "message": health.get("message"),
+        "details": health.get("details", {}),
     }
+
+
+def cache_source_health_result(source_id: str, result: dict[str, Any]) -> None:
+    """Update the same cache used by readiness/background ingestion."""
+    checked = datetime.now(timezone.utc).isoformat()
+    previous = _HEALTH_CACHE.get(source_id, {})
+    success = result.get("status") in {"VALID", "VALID_ZERO"}
+    _HEALTH_CACHE[source_id] = {
+        **result,
+        "last_check": checked,
+        "last_success": checked if success else previous.get("last_success"),
+        "last_failure": None if success else checked,
+    }
+    _CACHE_TIME[source_id] = time.monotonic()
 
 
 def _registry_lookup() -> list[dict[str, Any]]:
@@ -192,7 +236,7 @@ def record_health_results(rows: list[dict[str, Any]]) -> dict[str, Any]:
                     status = row.get("state", "SOURCE_ERROR")
                     if status not in {"VALID", "VALID_ZERO", "MISSING", "STALE", "SUSPECT", "NOT_SUPPORTED", "SOURCE_ERROR", "ESTIMATED", "NOT_CONFIGURED"}:
                         status = "SOURCE_ERROR"
-                    details = row.get("details") or {}
+                    details = {**(row.get("details") or {}), "freshness": row.get("freshness", "UNKNOWN")}
                     cursor.execute(
                         """INSERT INTO source_health(source_id,checked_at,status,http_status,latency_ms,last_observed_at,
                              last_success_at,error_code,error_message,details)
@@ -200,7 +244,7 @@ def record_health_results(rows: list[dict[str, Any]]) -> dict[str, Any]:
                            ON CONFLICT (source_id,checked_at) DO NOTHING""",
                         (row["source_id"], row.get("checked_at"), status, row.get("http_status"), row.get("latency_ms"),
                          row.get("last_observation"), row.get("last_success_at"),
-                         None if status == "VALID" else status, row.get("blocker"), Jsonb(details)),
+                         None if status in {"VALID", "VALID_ZERO"} else status, row.get("blocker"), Jsonb(details)),
                     )
                     saved += 1
         return {"persisted": True, "rows": saved}
@@ -233,12 +277,12 @@ async def refresh_source_health(force: bool = False) -> list[dict[str, Any]]:
             result = {"status": "SOURCE_ERROR", "message": f"ตรวจแหล่งข้อมูลไม่สำเร็จ ({type(exc).__name__})", "freshness": "UNKNOWN"}
         checked = datetime.now(timezone.utc).isoformat()
         previous = _HEALTH_CACHE.get(source.source_id, {})
-        is_success = result.get("status") == "VALID"
+        is_success = result.get("status") in {"VALID", "VALID_ZERO"}
         _HEALTH_CACHE[source.source_id] = {
             **result,
             "last_check": checked,
             "last_success": checked if is_success else previous.get("last_success"),
-            "last_failure": checked if not is_success else previous.get("last_failure"),
+            "last_failure": None if is_success else checked,
         }
         _CACHE_TIME[source.source_id] = time.monotonic()
 

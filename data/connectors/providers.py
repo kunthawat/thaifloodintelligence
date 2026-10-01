@@ -72,13 +72,18 @@ class ProviderConnector:
         try:
             if self.source_id == "hii_catalog":
                 discovery = await self.discover()
-                return {"status": discovery.status, "message": None if discovery.status == "VALID" else "No verified HTTPS CSV/ZIP water-level archive link was found on the official catalog page", "freshness": "ARCHIVE", "details": discovery.details}
+                message = None
+                if discovery.status == "VALID_ZERO":
+                    message = "หน้า catalog เชื่อมต่อได้ แต่ไม่พบไฟล์คลังย้อนหลังที่ดาวน์โหลดได้; ระบบยังใช้สถานีระดับน้ำสดจาก ThaiWater"
+                return {"status": discovery.status, "message": message, "freshness": "ARCHIVE", "details": discovery.details}
             if self.source_id == "hii_legacy_graph":
                 return {"status": "NOT_CONFIGURED", "message": "requires a station ID validated against returned station code/name", "freshness": "UNKNOWN"}
             if self.source_id == "tmd_qpe_ascii":
                 return await self._health_tmd_qpe()
             if self.source_id == "navy_tide":
                 return await self._health_navy()
+            if self.source_id == "dwr_ews_station":
+                return await self._health_dwr_stations()
             if self.source_id == "gistda_flood":
                 return await self._health_gistda()
             if self.source_id == "imerg":
@@ -214,13 +219,36 @@ class ProviderConnector:
             return {"status": "SOURCE_ERROR", "http_status": response.status, "message": "QPE target is not a ZIP payload; rainfall fallback active", "freshness": "UNKNOWN"}
         return {"status": "VALID", "http_status": response.status, "latency_ms": response.latency_ms, "message": "ZIP header reachable; full grid/header/units validation runs during ingest", "freshness": "UNKNOWN", "details": {"target": target, "payload_validation": "PENDING_INGEST", "semantics": "UNVERIFIED"}}
 
+    async def _health_dwr_stations(self) -> dict[str, Any]:
+        template = self._endpoint()
+        candidates = [value.strip() for value in os.getenv("DWR_EWS_PROBE_STATIONS", "STN0029,STN0168").split(",") if value.strip()]
+        attempts = []
+        for code in candidates[:5]:
+            try:
+                response = await fetch_https(template.replace("{station_code}", quote(code, safe="")), timeout=5)
+                matched = response.status == 200 and _contains_station_code(response.text, code)
+                attempts.append({"station_code": code, "http_status": response.status, "identity_verified": matched})
+                if matched:
+                    return {"status": "VALID", "http_status": response.status, "latency_ms": response.latency_ms,
+                            "message": "At least one DWR station page passed identity validation; numeric model semantics remain unverified",
+                            "freshness": "UNKNOWN",
+                            "details": {"probe_attempts": attempts, "stage_usable": False, "rainfall_usable": False}}
+            except Exception as exc:
+                attempts.append({"station_code": code, "error": type(exc).__name__})
+        return {"status": "SOURCE_ERROR", "message": "No configured DWR probe station passed reachability and identity validation",
+                "freshness": "UNKNOWN", "details": {"probe_attempts": attempts, "stage_usable": False, "rainfall_usable": False}}
+
     async def _health_navy(self) -> dict[str, Any]:
         response = await fetch_https(self._endpoint(), timeout=4)
         if response.status != 200:
             return {"status": "SOURCE_ERROR", "http_status": response.status, "message": f"Navy tide index returned HTTP {response.status}", "freshness": "UNKNOWN"}
         current_year = str(datetime.now(ZoneInfo("Asia/Bangkok")).year)
         candidates = _navy_year_links(response.url, response.text, current_year)
-        return {"status": "VALID" if candidates else "SOURCE_ERROR", "http_status": response.status, "message": None if candidates else f"Current-year {current_year} tide table not found", "freshness": "UNKNOWN", "details": {"year": current_year, "msl_resources": len(candidates), "products_are_forecasts": True}}
+        return {"status": "VALID" if candidates else "SOURCE_ERROR", "http_status": response.status,
+                "message": "Tide index/resources discovered; readiness requires successfully ingested prediction rows" if candidates else f"Current-year {current_year} tide table not found",
+                "freshness": "UNKNOWN",
+                "details": {"year": current_year, "msl_resources": len(candidates), "products_are_forecasts": True,
+                            "index_only": True, "ingested_prediction_required_for_readiness": True}}
 
     async def _health_gistda(self) -> dict[str, Any]:
         base = self._endpoint().rstrip("/")
@@ -262,9 +290,12 @@ class ProviderConnector:
             return DiscoveryResult(self.source_id, "SOURCE_ERROR", endpoint, details={"http_status": response.status})
         if self.source_id == "hii_catalog":
             resources = _catalog_resources(response.url, response.text)
-            status = "VALID" if resources else "NOT_SUPPORTED"
+            # An empty archive listing is a successful catalog check with zero
+            # downloadable files, not an unsupported connector or provider.
+            status = "VALID" if resources else "VALID_ZERO"
             return DiscoveryResult(self.source_id, status, endpoint, tuple(resources),
                                    details={"http_status": response.status, "archive_count": len(resources),
+                                            "archive_available": bool(resources),
                                             "reason": None if resources else "NO_HTTPS_ARCHIVE_RESOURCE"})
         resources: list[dict[str, str]] = []
         for anchor in anchors(response.text):
@@ -1109,7 +1140,11 @@ def _parse_tide_pdf(pdf_bytes: bytes, year: int, expected_station: str = "") -> 
         raise ConnectorNotConfigured(ConnectorBlocker("navy_tide", "PARSER_NOT_INSTALLED", "Install the optional pypdf dependency to extract tide prediction PDFs")) from exc
     reader = PdfReader(io.BytesIO(pdf_bytes))
     text = "\n".join(page.extract_text() or "" for page in reader.pages)
-    if expected_station and expected_station.casefold() not in text.casefold():
+    # The Navy index joins Thai and English station names with a comma, while
+    # the PDF prints the localized names on separate lines with location labels.
+    # Validate either complete name instead of requiring the combined index label.
+    station_aliases = [part.strip() for part in re.split(r"[,;|/]", expected_station) if len(part.strip()) >= 3]
+    if station_aliases and not any(alias.casefold() in text.casefold() for alias in station_aliases):
         raise ValueError("Navy PDF station name does not match the index row")
     if "mean sea level" not in text.casefold() and "ระดับทะเลปานกลาง" not in text:
         raise ValueError("Navy PDF does not confirm an MSL edition")
