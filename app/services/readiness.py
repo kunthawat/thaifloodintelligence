@@ -21,6 +21,7 @@ import psycopg
 from app.settings import configured_database_url
 from app.services.admin_scope import location_admin, scoped_warnings
 from app.services.geography import hydraulic_station_links, river_route
+from app.services.live_observation_ingest import canonical_nearby
 from app.services.rainfall_live import _read_cache as cached_rain
 from app.services.sources import cached_source_health
 from app.services.waterlevel_live import _read_cache as cached_stage
@@ -53,7 +54,7 @@ def _distance_km(lat: float, lon: float, row: dict) -> float:
 
 
 def _nearby(cache: dict | None, lat: float, lon: float, maximum_km: float,
-            observation_max_age_hours: float = 6) -> list[dict]:
+            observation_max_age_hours: float = 2) -> list[dict]:
     # Stale station snapshots remain visible on the map, but they cannot support
     # a current situation or hazard assessment.
     if not cache or cache.get("stale"):
@@ -184,8 +185,10 @@ def location_readiness(lat: float, lon: float, catchment: dict | None = None) ->
     stage_cache = cached_stage()
     rain_cache = cached_rain()
 
-    stage = _nearby(stage_cache, lat, lon, 25)
-    rain = _nearby(rain_cache, lat, lon, 25)
+    # Canonical observations are the system of record.  The file cache is only a
+    # transport fallback during startup or a temporary database outage.
+    stage = canonical_nearby(lat, lon, "stage", 25) or _nearby(stage_cache, lat, lon, 25)
+    rain = canonical_nearby(lat, lon, "rain", 25) or _nearby(rain_cache, lat, lon, 25)
     usable_stage = [row for row in stage if row.get("waterlevel_msl_m") is not None or row.get("waterlevel_station_m") is not None]
     measured_rain = [row for row in rain if row.get("rain_1h_mm") is not None or row.get("rain_24h_mm") is not None]
 
@@ -202,9 +205,24 @@ def location_readiness(lat: float, lon: float, catchment: dict | None = None) ->
     basin_stage = _same_catchment_stations(catchment, usable_stage)
 
     river_warning, flash_warning, coastal_warning = _classify_warnings(warnings.get("items") or [])
+    connected_overbank = [row for row in connected_stage
+                          if str(row.get("diff_wl_bank_text") or "").strip().startswith("ล้นตลิ่ง")
+                          or str(row.get("source_situation_level") or "") == "5"]
 
     if river_warning:
         river = _result(_warning_status(river_warning), ["SCOPED_OFFICIAL_WARNING"], river_warning)
+    elif connected_overbank:
+        river = _result(
+            "PARTIAL",
+            ["CONNECTED_STATION_PROVIDER_OVERBANK", "BANK_REFERENCE_STATION_SCOPED_NOT_LOCATION_DEPTH"],
+            [{"source": "ThaiWater", "station_id": row.get("station_id"),
+              "hydraulic_relation": row.get("hydraulic_relation"),
+              "waterlevel_msl_m": row.get("waterlevel_msl_m"),
+              "diff_wl_bank_m": row.get("diff_wl_bank_m"),
+              "diff_wl_bank_text": row.get("diff_wl_bank_text"),
+              "source_situation_level": row.get("source_situation_level"),
+              "distance_km_approx": row.get("distance_km_approx")} for row in connected_overbank],
+        )
     elif connected_stage:
         bank_verified_stage = [row for row in connected_stage
                                if row.get("bank_reference_quality") == "RUNTIME_CROSSCHECKED"
@@ -222,6 +240,8 @@ def location_readiness(lat: float, lon: float, catchment: dict | None = None) ->
             "hydraulic_relation": row.get("hydraulic_relation"),
             "station_reach_id": row.get("station_reach_id"),
             "target_reach_id": row.get("target_reach_id"),
+            "waterlevel_msl_m": row.get("waterlevel_msl_m"),
+            "source_situation_level": row.get("source_situation_level"),
             "distance_km_approx": row.get("distance_km_approx"),
         } for row in (bank_verified_stage or connected_stage)]
         reasons = ["HYDROLOGICALLY_CONNECTED_STAGE"]

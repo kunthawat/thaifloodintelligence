@@ -454,19 +454,24 @@
         : (risk.risk_headline || 'มีสัญญาณความเสี่ยงที่ต้องติดตาม');
       $('#riskSubhead').textContent = 'ผลประเมินใช้เฉพาะข้อมูลที่ผ่านเกณฑ์';
     } else {
-      $('#riskHeadline').textContent = 'ยังประเมินความเสี่ยงไม่ได้';
-      $('#riskSubhead').textContent = 'ข้อมูลตรวจวัดและแบบจำลองที่จำเป็นยังไม่พร้อม';
+      $('#riskHeadline').textContent = risk.evidence_headline || 'ยังประเมินความเสี่ยงเชิงปริมาณไม่ได้';
+      $('#riskSubhead').textContent = risk.readiness && risk.readiness.situation && risk.readiness.situation.ready
+        ? 'มีข้อมูลสถานการณ์ที่ผ่านเกณฑ์สำหรับรายงาน แต่ยังไม่พอสำหรับความน่าจะเป็น/ETA/ความลึก'
+        : 'ข้อมูลตรวจวัดและแบบจำลองที่จำเป็นยังไม่พร้อม';
     }
     const impact = forecast.first_impact;
     $('#impactValue').textContent = impact && impact.eligible && impact.range_hours
       ? 'ประมาณ ' + impact.range_hours[0] + '–' + impact.range_hours[1] + ' ชม.'
       : 'ยังประเมินเวลาไม่ได้';
-    $('#hazardValue').textContent = risk.dominant_hazard || 'ข้อมูลไม่พอจำแนกภัย';
+    $('#hazardValue').textContent = 'ข้อมูลไม่พอจำแนกภัย';
     const hazardLabels = {
       RIVER_OVERFLOW: 'น้ำล้นตลิ่ง', FLASH_FLOOD: 'น้ำป่าไหลหลาก', LOCAL_RAIN: 'ฝนในพื้นที่',
       COASTAL_TIDAL: 'น้ำทะเลหนุน', COMPOUND: 'หลายปัจจัยร่วมกัน',
     };
-    if (risk.dominant_hazard && hazardLabels[risk.dominant_hazard]) $('#hazardValue').textContent = hazardLabels[risk.dominant_hazard];
+    const hazardCode = risk.dominant_hazard || risk.evidence_hazard;
+    if (hazardCode && hazardLabels[hazardCode]) {
+      $('#hazardValue').textContent = hazardLabels[hazardCode] + (risk.dominant_hazard ? '' : ' · หลักฐานประกอบ');
+    }
     $('#bankfullValue').textContent = formatOutput(forecast.time_to_bankfull, 'time');
     $('#peakValue').textContent = formatOutput(forecast.peak_above_bank_m, 'meters');
     $('#peakTimeValue').textContent = formatOutput(forecast.time_to_peak, 'time');

@@ -20,6 +20,14 @@ def _database():
     return psycopg.connect(url)
 
 
+def _datum_required(variable: str) -> bool:
+    return variable in {"WATER_LEVEL", "PREDICTED_TIDE_LEVEL", "STAGE", "SEA_LEVEL"}
+
+
+def _freshness_ok(item: Any) -> bool:
+    return item.quality_state in {"VALID", "VALID_ZERO", "ESTIMATED"}
+
+
 def persist_observations(observations: list[Any]) -> dict[str, int]:
     try:
         from psycopg.types.json import Jsonb
@@ -33,7 +41,17 @@ def persist_observations(observations: list[Any]) -> dict[str, int]:
                     skipped += 1
                     continue
                 state = item.quality_state
-                quality_score = 1.0 if state in {"VALID", "VALID_ZERO"} else 0.25 if item.value is not None else 0.0
+                freshness_ok = _freshness_ok(item)
+                datum_ok = bool(item.datum) if _datum_required(item.variable) else True
+                semantic_ok = item.semantic_status == "VERIFIED"
+                evidence_eligible = bool(
+                    state in {"VALID", "VALID_ZERO"}
+                    and freshness_ok
+                    and item.value is not None
+                    and bool(item.unit)
+                    and datum_ok
+                )
+                quality_score = 1.0 if semantic_ok and evidence_eligible else 0.8 if evidence_eligible else 0.25 if item.value is not None else 0.0
                 cursor.execute(
                     """INSERT INTO observations
                        (entity_type,entity_id,variable,value,unit,datum,observed_at,source_id,source_record_id,
@@ -44,7 +62,9 @@ def persist_observations(observations: list[Any]) -> dict[str, int]:
                        RETURNING observation_id,observed_at""",
                     (item.entity_type, item.entity_id, item.variable, item.value, item.unit, item.datum,
                      item.observed_at, item.source_id, item.source_record_id, state, quality_score,
-                     item.observation_type, Jsonb({**item.raw_payload, "physics_eligible": item.physics_eligible, "semantic_status": item.semantic_status})),
+                     item.observation_type, Jsonb({**item.raw_payload, "physics_eligible": item.physics_eligible,
+                                                     "semantic_status": item.semantic_status,
+                                                     "evidence_eligible": evidence_eligible})),
                 )
                 row = cursor.fetchone()
                 if not row:
@@ -52,10 +72,11 @@ def persist_observations(observations: list[Any]) -> dict[str, int]:
                     continue
                 cursor.execute(
                     """INSERT INTO observation_quality
-                       (observation_id,observed_at,timestamp_ok,range_ok,unit_ok,datum_ok,semantics_ok,reasons)
-                       VALUES (%s,%s,true,%s,%s,%s,%s,%s)""",
-                    (row[0], row[1], item.value is not None, bool(item.unit), bool(item.datum),
-                     item.semantic_status == "VERIFIED" and item.physics_eligible, Jsonb(list(item.reasons))),
+                       (observation_id,observed_at,timestamp_ok,range_ok,spike_ok,neighbour_ok,
+                        freshness_ok,unit_ok,datum_ok,semantics_ok,reasons)
+                       VALUES (%s,%s,true,%s,NULL,NULL,%s,%s,%s,%s,%s)""",
+                    (row[0], row[1], item.value is not None, freshness_ok, bool(item.unit), datum_ok,
+                     semantic_ok, Jsonb(list(item.reasons))),
                 )
                 inserted += 1
     return {"inserted": inserted, "skipped_or_duplicate": skipped}

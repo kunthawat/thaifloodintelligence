@@ -11,13 +11,16 @@ ROOT = Path(__file__).parents[1]
 class ManifestDatabaseTests(unittest.TestCase):
     def test_migrations_follow_manifest_order(self):
         actual = [path.name for path in sorted((ROOT / "db" / "migrations").glob("*.sql"))]
-        expected = [
+        frozen_core = [
             "001_types.sql", "010_sources.sql", "020_geography.sql", "030_network.sql",
             "040_stations.sql", "050_observations.sql", "060_controls_boundaries.sql",
             "070_bank_storage.sql", "080_events.sql", "090_forecasts.sql",
             "100_warnings_impacts.sql", "110_indexes.sql", "120_seed_sources.sql", "130_seed_stations.sql",
         ]
-        self.assertEqual(actual, expected)
+        self.assertEqual(actual[:len(frozen_core)], frozen_core)
+        numeric_prefixes = [int(name.split("_", 1)[0]) for name in actual]
+        self.assertEqual(numeric_prefixes, sorted(numeric_prefixes))
+        self.assertEqual(len(numeric_prefixes), len(set(numeric_prefixes)))
 
     def test_observations_partition_and_source_warnings_are_deduplicated(self):
         observation = (ROOT / "db" / "migrations" / "050_observations.sql").read_text(encoding="utf-8")

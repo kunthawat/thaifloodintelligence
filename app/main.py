@@ -22,7 +22,7 @@ from app.services.sources import get_source_registry, record_health_results, ref
 from app.services.admin_scope import location_admin, location_boundary, scoped_warnings
 from app.services.readiness import location_readiness
 from app.services.warning_refresh import background_refresh
-from app.services.observation_refresh import background_refresh as background_observation_refresh
+from app.services.observation_refresh import background_refresh as background_observation_refresh, refresh_once as refresh_observations_once
 from app.services.events_live import waves_near_location, event_record
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -128,6 +128,27 @@ def location_context(
     }
 
 
+def _risk_evidence_summary(readiness: dict[str, Any]) -> tuple[str | None, str | None]:
+    hazards = readiness.get("hazards") or {}
+    priority = (
+        ("RIVER_OVERFLOW", "river_overflow"),
+        ("FLASH_FLOOD", "flash_flood"),
+        ("COASTAL_TIDAL", "coastal_tidal"),
+        ("LOCAL_RAIN", "local_rain"),
+        ("COMPOUND", "compound"),
+    )
+    for public_name, key in priority:
+        row = hazards.get(key) or {}
+        reasons = row.get("reasons") or []
+        if "SCOPED_OFFICIAL_WARNING" in reasons:
+            return public_name, "มีประกาศเตือนทางการที่ยังอยู่ในขอบเขตพื้นที่"
+        if "CONNECTED_STATION_PROVIDER_OVERBANK" in reasons:
+            return public_name, "พบสถานีที่เชื่อมโยงรายงานน้ำล้นตลิ่ง แต่ยังไม่เท่ากับความลึก ณ จุดที่เลือก"
+    if readiness.get("overall") in {"READY", "PARTIAL"}:
+        return None, "มีข้อมูลสถานการณ์บางส่วน แต่ยังไม่มี calibration พอสำหรับความน่าจะเป็นหรือระดับน้ำ ณ จุด"
+    return None, None
+
+
 @app.get("/v1/location/risk")
 def location_risk(
     lat: float = Query(..., ge=-90, le=90),
@@ -148,11 +169,14 @@ def location_risk(
             "evidence_status": row.get("status", "NOT_READY"),
             "evidence_reasons": row.get("reasons", []),
         }
+    evidence_hazard, evidence_headline = _risk_evidence_summary(readiness)
     return {
         "location": coordinates,
         "risk_level": "UNKNOWN",
         "overall_probability": None,
         "dominant_hazard": None,
+        "evidence_hazard": evidence_hazard,
+        "evidence_headline": evidence_headline,
         "hazards": hazard_rows,
         "occurrence": forecast["occurrence"],
         "confidence": forecast["confidence"],
@@ -348,19 +372,21 @@ async def official_warnings(
 async def data_quality(refresh: bool = Query(default=False)) -> dict[str, Any]:
     health_rows = await refresh_source_health(force=refresh)
     health_persistence = record_health_results(health_rows)
+    observation_refresh = await refresh_observations_once() if refresh else None
     registry = get_source_registry()
     health_by_source = {item["source_id"]: item for item in health_rows}
+    db = database_status()
     required_warning = False
-    measured_rain_available = (
+    rain_source_reachable = (
         (item := health_by_source.get("thaiwater_rain_24h", {})).get("state") == "VALID"
         and item.get("details", {}).get("parsed_station_count", 0) > 0
     )
+    measured_rain_available = db.get("thaiwater_rain_evidence_ready_count", 0) > 0
     required_rain = any(
         (item := health_by_source.get(source_id, {})).get("state") == "VALID"
         and item.get("details", {}).get("rainfall_usable") is True
         for source_id in ("tmd_qpe_ascii", "dwr_ews_station", "imerg")
     )
-    db = database_status()
     required_warning = db.get("scoped_current_warning_count", 0) > 0
     gis_ready = bool(
         db.get("basin_count", 0) > 0
@@ -372,10 +398,11 @@ async def data_quality(refresh: bool = Query(default=False)) -> dict[str, Any]:
         and item.get("details", {}).get("stage_usable") is True
         for source_id in ("hii_legacy_daily", "hii_legacy_graph", "dwr_ews_station")
     )
-    stage_observations_available = (
+    stage_source_reachable = (
         (item := health_by_source.get("thaiwater_v3", {})).get("state") == "VALID"
         and item.get("details", {}).get("parsed_station_count", 0) > 0
     )
+    stage_observations_available = db.get("thaiwater_stage_evidence_ready_count", 0) > 0
     any_evidence_path = bool(required_warning or measured_rain_available or stage_observations_available or
                              required_rain or required_stage)
     global_hazard_status = "PARTIAL" if gis_ready and any_evidence_path else "NOT_READY"
@@ -385,24 +412,32 @@ async def data_quality(refresh: bool = Query(default=False)) -> dict[str, Any]:
         "source_health": health_rows or source_health(),
         "source_registry": registry,
         "source_health_persistence": health_persistence,
+        "observation_refresh": observation_refresh,
         "readiness": {
             "DATA_PLATFORM_READY": db.get("state") == "READY" and db.get("migrations_ready", False),
             "MAP_READY": gis_ready,
             "SITUATION_REPORT_READY": situation_report_ready,
+            # Backward-compatible legacy flag.  This means evidence can be
+            # evaluated, not that a flood occurrence/quantitative forecast exists.
             "HAZARD_ONLY_READY": global_hazard_status in {"READY", "PARTIAL"},
+            "HAZARD_EVIDENCE_READY": global_hazard_status in {"READY", "PARTIAL"},
             "GLOBAL_HAZARD_STATUS": global_hazard_status,
             "QUANT_FORECAST_PARTIAL": False,
             "QUANT_FORECAST_READY": False,
             "POINT_DEPTH_READY": False,
             "conditions": {
                 "official_warning_pathway": required_warning,
+                "rain_source_reachable": rain_source_reachable,
+                "stage_source_reachable": stage_source_reachable,
                 "rain_station_observations_available": measured_rain_available,
                 "stage_station_observations_available": stage_observations_available,
                 "rainfall_pathway": required_rain,
-                "stage_or_hazard_pathway": required_stage or required_warning,
+                "stage_or_hazard_pathway": required_stage or required_warning or stage_observations_available,
                 "gis_imported": gis_ready,
                 "postgis_connected": db.get("state") == "READY",
                 "migrations_ready": db.get("migrations_ready", False),
+                "canonical_observation_evidence_ready": db.get("observation_evidence_ready_count", 0) > 0,
+                "canonical_observation_physics_ready": db.get("observation_physics_ready_count", 0) > 0,
             },
             "blockers": [name for name, ready in (
                 ("POSTGIS_MIGRATIONS_NOT_READY", db.get("migrations_ready", False)),

@@ -136,6 +136,9 @@ class ProviderConnector:
                 details["parsed_station_count"] = len(records)
                 details["with_msl_count"] = sum(record["waterlevel_msl_m"] is not None for record in records)
                 details["source_timezone"] = "UNVERIFIED"
+                details["stage_evidence_usable"] = details["with_msl_count"] > 0
+                details["stage_physics_usable"] = False
+                details["physics_blocker"] = "SOURCE_TIMEZONE_AND_LOCATION_CALIBRATION_NOT_FULLY_VERIFIED"
                 last_observed = max((record["observed_at_source"] for record in records if record["observed_at_source"]), default=None)
             if self.source_id == "thaiwater_rain_24h":
                 from app.services.rainfall_live import normalize
@@ -143,7 +146,9 @@ class ProviderConnector:
                 details["parsed_station_count"] = len(records)
                 details["with_rain_24h_count"] = sum(record["rain_24h_mm"] is not None for record in records)
                 details["source_timezone"] = "UNVERIFIED"
+                details["rainfall_evidence_usable"] = details["with_rain_24h_count"] > 0
                 details["rainfall_usable"] = False
+                details["physics_blocker"] = "POINT_REPRESENTATIVENESS_AND_FLOOD_TRIGGER_NOT_CALIBRATED"
                 last_observed = max((record["observed_at_source"] for record in records if record["observed_at_source"]), default=None)
             if self.source_id in {"dwr_ews_warnings", "hii_public_warning"}:
                 schema_ok = _warning_schema_recognized(response.text)
@@ -557,6 +562,10 @@ class ProviderConnector:
     def normalize(self, raw: RawRecord) -> list[CanonicalObservation]:
         if raw.source_id != self.source_id:
             raise ValueError("raw record source does not match connector")
+        if self.source_id == "thaiwater_v3":
+            return _normalize_thaiwater_waterlevel(raw)
+        if self.source_id == "thaiwater_rain_24h":
+            return _normalize_thaiwater_rain(raw)
         if self.source_id in {"rid_dam", "rid_reservoir"}:
             return _normalize_rid(raw)
         if self.source_id in {"hii_catalog", "hii_legacy_daily", "hii_legacy_graph", "dwr_ews_station"}:
@@ -570,6 +579,10 @@ class ProviderConnector:
         return [CanonicalObservation("source_record", str(raw.record_id or "unknown"), "UNMAPPED", None, None, None, raw.observed_at, self.source_id, raw.record_id, "NOT_SUPPORTED", "OBSERVED", "UNVERIFIED", raw.payload, False, ("provider_schema_or_semantics_not_verified",))]
 
     def validate_semantics(self) -> SemanticValidation:
+        if self.source_id == "thaiwater_v3":
+            return SemanticValidation("PARTIAL", ("waterlevel_msl", "station identity", "provider bank/status fields as station-scoped evidence"), ("timestamp timezone authority", "location bank transfer", "calibrated routing"), ("ThaiWater stage is usable as current situation evidence after freshness QC; quantitative location physics remains gated",))
+        if self.source_id == "thaiwater_rain_24h":
+            return SemanticValidation("PARTIAL", ("rain_1h", "rain_24h", "station identity"), ("timestamp timezone authority", "point representativeness", "flood trigger threshold"), ("ThaiWater rainfall is station context until runoff/trigger calibration is verified",))
         if self.source_id == "rid_dam" or self.source_id == "rid_reservoir":
             return SemanticValidation("PARTIAL", ("capacity", "storage", "active_storage", "dead_storage", "volume", "percent_storage"), ("inflow", "outflow", "exact_observation_time"), ("RID inflow/outflow units are undocumented; never use them in physical mass balance",))
         if self.source_id.startswith("hii_"):
@@ -915,6 +928,56 @@ def _extract_timestamp(payload: dict[str, Any]) -> str | None:
         return dt.astimezone(timezone.utc).isoformat()
     return None
 
+
+
+def _normalize_thaiwater_waterlevel(raw: RawRecord) -> list[CanonicalObservation]:
+    from app.services.live_observation_ingest import _observed_at, _state
+    from app.services.waterlevel_live import _normalize as normalize_rows
+
+    payload = raw.payload.get("payload") if isinstance(raw.payload.get("payload"), dict) else raw.payload
+    result: list[CanonicalObservation] = []
+    for row in normalize_rows(payload):
+        observed, time_reasons = _observed_at(row.get("observed_at_source"))
+        value = row.get("waterlevel_msl_m")
+        if value is None:
+            continue
+        state, fresh = _state(value, observed, 2.0)
+        observed_iso = observed.isoformat() if observed else None
+        station_id = str(row.get("station_id") or row.get("station_code") or "unknown")
+        record_id = f"{station_id}:{observed_iso or row.get('observed_at_source') or 'unknown'}"
+        reasons = tuple(time_reasons + ["THAIWATER_MSL_FIELD", "STATION_BANK_REFERENCE_IS_STATION_SCOPED"]
+                        + ([] if fresh else ["FRESHNESS_NOT_ACCEPTED_AS_CURRENT_EVIDENCE"]))
+        result.append(CanonicalObservation(
+            "station", station_id, "WATER_LEVEL", value, "m", "MSL", observed_iso, raw.source_id,
+            record_id, state, "OBSERVED", "VERIFIED", row, False, reasons
+        ))
+    return result
+
+
+def _normalize_thaiwater_rain(raw: RawRecord) -> list[CanonicalObservation]:
+    from app.services.live_observation_ingest import _observed_at, _state
+    from app.services.rainfall_live import normalize as normalize_rows
+
+    payload = raw.payload.get("payload") if isinstance(raw.payload.get("payload"), dict) else raw.payload
+    result: list[CanonicalObservation] = []
+    for row in normalize_rows(payload):
+        observed, time_reasons = _observed_at(row.get("observed_at_source"))
+        observed_iso = observed.isoformat() if observed else None
+        station_id = str(row.get("station_id") or row.get("station_code") or "unknown")
+        for field, variable in (("rain_1h_mm", "RAIN_1H"), ("rain_24h_mm", "RAIN_24H")):
+            value = row.get(field)
+            if value is None:
+                continue
+            state, fresh = _state(value, observed, 2.0)
+            record_id = f"{station_id}:{observed_iso or row.get('observed_at_source') or 'unknown'}"
+            reasons = tuple(time_reasons + ["STATION_RAINFALL_IS_CONTEXT_NOT_POINT_RAINFALL",
+                                            "FLOOD_TRIGGER_THRESHOLD_NOT_CALIBRATED"]
+                            + ([] if fresh else ["FRESHNESS_NOT_ACCEPTED_AS_CURRENT_EVIDENCE"]))
+            result.append(CanonicalObservation(
+                "station", station_id, variable, value, "mm", None, observed_iso, raw.source_id,
+                record_id, state, "OBSERVED", "VERIFIED", row, False, reasons
+            ))
+    return result
 
 def _normalize_stage(raw: RawRecord, source: SourceDefinition) -> list[CanonicalObservation]:
     payload = raw.payload

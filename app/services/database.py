@@ -57,6 +57,61 @@ def database_status() -> dict[str, Any]:
                                   WHERE issued_at >= now()-interval '2 hours'
                                     AND (valid_to IS NULL OR valid_to >= now()) AND geom IS NOT NULL""")
                 counts["scoped_current_warning_count"] = int(cursor.fetchone()[0])
+                cursor.execute("SELECT to_regclass('public.observations') IS NOT NULL")
+                if cursor.fetchone()[0]:
+                    cursor.execute("SELECT count(*) FROM observations")
+                    counts["observation_count"] = int(cursor.fetchone()[0])
+                    cursor.execute("SELECT count(*) FROM observations WHERE source_id='thaiwater_v3' AND variable='WATER_LEVEL'")
+                    counts["thaiwater_stage_observation_count"] = int(cursor.fetchone()[0])
+                    cursor.execute("SELECT count(*) FROM observations WHERE source_id='thaiwater_rain_24h' AND variable IN ('RAIN_1H','RAIN_24H')")
+                    counts["thaiwater_rain_observation_count"] = int(cursor.fetchone()[0])
+                    cursor.execute("""SELECT count(*) FROM observations o
+                                      JOIN observation_quality q USING(observation_id,observed_at)
+                                      WHERE o.source_id='thaiwater_v3' AND o.variable='WATER_LEVEL'
+                                        AND o.observed_at BETWEEN now()-interval '2 hours' AND now()+interval '5 minutes'
+                                        AND o.quality_state IN ('VALID','VALID_ZERO')
+                                        AND q.timestamp_ok IS TRUE AND q.range_ok IS TRUE AND q.freshness_ok IS TRUE
+                                        AND q.unit_ok IS TRUE AND q.datum_ok IS TRUE AND q.semantics_ok IS TRUE""")
+                    counts["thaiwater_stage_evidence_ready_count"] = int(cursor.fetchone()[0])
+                    cursor.execute("""SELECT count(*) FROM observations o
+                                      JOIN observation_quality q USING(observation_id,observed_at)
+                                      WHERE o.source_id='thaiwater_rain_24h' AND o.variable IN ('RAIN_1H','RAIN_24H')
+                                        AND o.observed_at BETWEEN now()-interval '2 hours' AND now()+interval '5 minutes'
+                                        AND o.quality_state IN ('VALID','VALID_ZERO')
+                                        AND q.timestamp_ok IS TRUE AND q.range_ok IS TRUE AND q.freshness_ok IS TRUE
+                                        AND q.unit_ok IS TRUE AND q.datum_ok IS TRUE AND q.semantics_ok IS TRUE""")
+                    counts["thaiwater_rain_evidence_ready_count"] = int(cursor.fetchone()[0])
+                    cursor.execute("""SELECT count(*) FROM observations o
+                                      JOIN observation_quality q USING(observation_id,observed_at)
+                                      WHERE q.timestamp_ok IS TRUE AND q.range_ok IS TRUE
+                                        AND q.freshness_ok IS TRUE AND q.unit_ok IS TRUE AND q.datum_ok IS TRUE
+                                        AND q.semantics_ok IS TRUE""")
+                    counts["observation_evidence_ready_count"] = int(cursor.fetchone()[0])
+                    cursor.execute("""SELECT count(*) FROM observations o
+                                      JOIN observation_quality q USING(observation_id,observed_at)
+                                      WHERE q.timestamp_ok IS TRUE AND q.range_ok IS TRUE
+                                        AND q.freshness_ok IS TRUE AND q.unit_ok IS TRUE AND q.datum_ok IS TRUE
+                                        AND q.semantics_ok IS TRUE
+                                        AND COALESCE((o.raw_payload->>'physics_eligible')::boolean,false) IS TRUE""")
+                    counts["observation_physics_ready_count"] = int(cursor.fetchone()[0])
+                    cursor.execute("""SELECT max(observed_at) FILTER (WHERE source_id='thaiwater_v3'),
+                                             max(observed_at) FILTER (WHERE source_id='thaiwater_rain_24h')
+                                      FROM observations""")
+                    latest_stage, latest_rain = cursor.fetchone()
+                    counts["thaiwater_stage_latest"] = latest_stage.isoformat() if latest_stage else None
+                    counts["thaiwater_rain_latest"] = latest_rain.isoformat() if latest_rain else None
+                else:
+                    counts.update({
+                        "observation_count": 0,
+                        "thaiwater_stage_observation_count": 0,
+                        "thaiwater_rain_observation_count": 0,
+                        "thaiwater_stage_evidence_ready_count": 0,
+                        "thaiwater_rain_evidence_ready_count": 0,
+                        "observation_evidence_ready_count": 0,
+                        "observation_physics_ready_count": 0,
+                        "thaiwater_stage_latest": None,
+                        "thaiwater_rain_latest": None,
+                    })
         return {
             "state": "READY",
             "postgis_version": row[0] if row else None,

@@ -102,6 +102,36 @@ class ManifestConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tide.datum, "MSL")
         self.assertFalse(tide.physics_eligible)
 
+
+    def test_thaiwater_connectors_normalize_live_station_payloads_instead_of_unmapped(self):
+        now_local = datetime.now().astimezone().replace(tzinfo=None).isoformat(sep=" ", timespec="seconds")
+        water_raw = RawRecord("thaiwater_v3", None, {"payload": {
+            "waterlevel_data": {"result": "OK", "data": [{
+                "station": {"id": 10, "tele_station_lat": "13.7", "tele_station_long": "100.5",
+                            "tele_station_name": {"th": "สถานีทดสอบ"}},
+                "geocode": {}, "agency": {}, "waterlevel_datetime": now_local,
+                "waterlevel_msl": "1.2", "waterlevel_m": "1.3",
+            }]}}})
+        stage = CONNECTORS["thaiwater_v3"].normalize(water_raw)
+        self.assertEqual(len(stage), 1)
+        self.assertEqual(stage[0].variable, "WATER_LEVEL")
+        self.assertNotEqual(stage[0].variable, "UNMAPPED")
+        self.assertEqual(stage[0].unit, "m")
+        self.assertEqual(stage[0].datum, "MSL")
+        self.assertFalse(stage[0].physics_eligible)
+
+        rain_raw = RawRecord("thaiwater_rain_24h", None, {"payload": {
+            "result": "OK", "data": [{
+                "station": {"id": 20, "tele_station_lat": "13.7", "tele_station_long": "100.5",
+                            "tele_station_name": {"th": "สถานีฝนทดสอบ"}},
+                "geocode": {}, "agency": {}, "rainfall_datetime": now_local,
+                "rain_1h": "2.0", "rain_24h": "30.0",
+            }]}})
+        rain = CONNECTORS["thaiwater_rain_24h"].normalize(rain_raw)
+        self.assertEqual({item.variable for item in rain}, {"RAIN_1H", "RAIN_24H"})
+        self.assertTrue(all(item.unit == "mm" for item in rain))
+        self.assertTrue(all(not item.physics_eligible for item in rain))
+
     def test_navy_station_download_is_selected_by_current_year_msl_column(self):
         page = """
           <h1>มาตราน้ำในน่านน้ำไทย พ.ศ.2569</h1>
